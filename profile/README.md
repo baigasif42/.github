@@ -50,7 +50,7 @@ Ready to elevate your customer engagement strategies?
 ## Contact
 For inquiries or support, please reach out to us at:
 - **Email**: Hello@rewardsy.one
-- **Website**: [Rewardsy](rewardsy.one)
+- **Website**: [Rewardsy](home.rewardsy.one)
 
 Rewardsy © 2024. All rights reserved.
 
