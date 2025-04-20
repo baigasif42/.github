@@ -1,4 +1,4 @@
-name: Build and deploy a container to an Azure Web App
+name: Check if the build is happening and formatting is correct
 
 env:
   DEV_REWARDSY_BACKEND_NAME: rewardsy-dev-backend
