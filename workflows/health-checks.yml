@@ -1,0 +1,73 @@
+name: Rewardsy Health Checks
+
+on:
+  schedule:
+    # Runs every 10 minutes
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+env:
+  REWARDSY_BACKEND_URL: https://api.rewardsy.one/rewardsy-backend
+  REWARDSY_WEBAPP_URL: https://app.rewardsy.one
+
+jobs:
+  rewardsy-backend-health-check:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.health_check.outcome }}
+    steps:
+      - name: Check rewardsy-backend health
+        id: health_check
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.REWARDSY_BACKEND_URL }}/docs/core)
+          if [ "$response" -ne 200 ]; then
+            echo "Rewardsy backend is down! HTTP status code: $response"
+            exit 1
+          else
+            echo "Rewardsy backend is healthy."
+          fi
+
+  rewardsy-webapp-health-check:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.health_check.outcome }}
+    steps:
+      - name: Check rewardsy-webapp health
+        id: health_check
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.REWARDSY_WEBAPP_URL }})
+          if [ "$response" -ne 200 ]; then
+            echo "Rewardsy webapp is down! HTTP status code: $response"
+            exit 1
+          else
+            echo "Rewardsy webapp is healthy."
+          fi
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [rewardsy-backend-health-check, rewardsy-webapp-health-check]
+    if: always() && (needs['rewardsy-backend-health-check'].outputs.status == 'failure' || needs['rewardsy-webapp-health-check'].outputs.status == 'failure')
+    steps:
+      - name: Send Discord Notification for Backend Failure
+        if: needs['rewardsy-backend-health-check'].outputs.status == 'failure'
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
+          status: "failure"
+          title: "🚨 Health check failed for rewardsy-backend!"
+          description: |
+            @everyone The health check for rewardsy-backend has failed. Please investigate.
+          color: 0xff0000
+          url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Send Discord Notification for Webapp Failure
+        if: needs['rewardsy-webapp-health-check'].outputs.status == 'failure'
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
+          status: "failure"
+          title: "🚨 Health check failed for rewardsy-webapp!"
+          description: |
+            @everyone The health check for rewardsy-webapp has failed. Please investigate.
+          color: 0xff0000
+          url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
