@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  REWARDSY_BACKEND_URL: https://api.rewardsy.one/rewardsy-backend
+  REWARDSY_BACKEND_URL: https://app.rewardsy.one/rewardsy-backend
   REWARDSY_WEBAPP_URL: https://app.rewardsy.one
 
 jobs:
