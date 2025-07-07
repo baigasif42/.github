@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  REWARDSY_BACKEND_URL: https://app.rewardsy.one/rewardsy-backend
+  REWARDSY_BACKEND_URL: https://api.rewardsy.one/rewardsy-backend
   REWARDSY_WEBAPP_URL: https://app.rewardsy.one
 
 jobs:
@@ -43,31 +43,29 @@ jobs:
             echo "Rewardsy webapp is healthy."
           fi
 
-  notify:
+  notify-status:
     runs-on: ubuntu-latest
     needs: [rewardsy-backend-health-check, rewardsy-webapp-health-check]
-    if: always() && (needs['rewardsy-backend-health-check'].outputs.status == 'failure' || needs['rewardsy-webapp-health-check'].outputs.status == 'failure')
+    if: always()
     steps:
-      - name: Send Discord Notification for Backend Failure
-        if: needs['rewardsy-backend-health-check'].outputs.status == 'failure'
+      - name: Send Discord Notification for Backend Status
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
-          status: "failure"
-          title: "🚨 Health check failed for rewardsy-backend!"
+          status: ${{ needs['rewardsy-backend-health-check'].outputs.status }}
+          title: "🚦 Health check status for rewardsy-backend: ${{ needs['rewardsy-backend-health-check'].outputs.status }}"
           description: |
-            @everyone The health check for rewardsy-backend has failed. Please investigate.
-          color: 0xff0000
+            ${{ needs['rewardsy-backend-health-check'].outputs.status == 'failure' && '@everyone' || '' }} The health check for rewardsy-backend has finished with status: ${{ needs['rewardsy-backend-health-check'].outputs.status }}.
+          color: ${{ needs['rewardsy-backend-health-check'].outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
           url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-      - name: Send Discord Notification for Webapp Failure
-        if: needs['rewardsy-webapp-health-check'].outputs.status == 'failure'
+      - name: Send Discord Notification for Webapp Status
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
-          status: "failure"
-          title: "🚨 Health check failed for rewardsy-webapp!"
+          status: ${{ needs['rewardsy-webapp-health-check'].outputs.status }}
+          title: "🚦 Health check status for rewardsy-webapp: ${{ needs['rewardsy-webapp-health-check'].outputs.status }}"
           description: |
-            @everyone The health check for rewardsy-webapp has failed. Please investigate.
-          color: 0xff0000
+            ${{ needs['rewardsy-webapp-health-check'].outputs.status == 'failure' && '@everyone' || '' }} The health check for rewardsy-webapp has finished with status: ${{ needs['rewardsy-webapp-health-check'].outputs.status }}.
+          color: ${{ needs['rewardsy-webapp-health-check'].outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
           url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
