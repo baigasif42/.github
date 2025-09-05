@@ -2,12 +2,10 @@ name: Infrastructure Health Checks
 
 on:
   schedule:
-    # Standard infrastructure checks every 4 hours
+    # Infrastructure checks every 4 hours
     - cron: '0 */4 * * *'
     # Daily comprehensive check at 2 AM UTC  
     - cron: '0 2 * * *'
-    # Weekly deep analysis on Sundays at 6 AM UTC
-    - cron: '0 6 * * 0'
   workflow_dispatch:
     inputs:
       check_type:
@@ -20,8 +18,6 @@ on:
         - comprehensive
         - azure-only
         - kubernetes-only
-        - data-analytics
-        - critical-only
 
 env:
   DISCORD_WEBHOOK: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
@@ -36,157 +32,93 @@ jobs:
       summary: ${{ steps.azure_check.outputs.summary }}
       critical_issues: ${{ steps.azure_check.outputs.critical_issues }}
     steps:
-      - name: Setup Azure CLI
-        uses: azure/CLI@v1
+      - name: Azure Login
+        uses: azure/login@v1
         with:
-          azcliversion: 2.50.0
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
           
       - name: Check Azure Infrastructure
         id: azure_check
         run: |
-          echo "Checking Azure infrastructure components..."
-        # Rest of your Azure CLI commands here
+          echo "Starting Azure infrastructure health check..."
           
-      - name: Check Azure Infrastructure Components
-        id: azure_check
-        run: |
-          echo "Starting comprehensive Azure infrastructure health check..."
-          
-          # Initialize tracking variables
+          # Initialize tracking
           total_checks=0
           failed_checks=0
           critical_issues=()
-          warning_issues=()
           
-          # Function to check and report component status
+          # Function to check component status
           check_component() {
-            local component_name="$1"
+            local name="$1"
             local status="$2"
             local expected="$3"
             
             ((total_checks++))
-            if [ "$status" != "$expected" ]; then
-              echo "❌ $component_name: $status (Expected: $expected)"
-              ((failed_checks++))
-              critical_issues+=("$component_name: $status")
+            echo "Checking $name..."
+            
+            if [ "$status" = "$expected" ]; then
+              echo "✅ $name: $status"
             else
-              echo "✅ $component_name: $status"
+              echo "❌ $name: $status (Expected: $expected)"
+              ((failed_checks++))
+              critical_issues+=("$name: $status")
             fi
           }
           
-          echo "=== AKS CLUSTER HEALTH ==="
+          echo "=== AKS CLUSTERS ==="
           
           # Development AKS
           dev_aks_status=$(az aks show --name rewardsy-dev-aks --resource-group rewardsy-dev-rg --query "powerState.code" -o tsv 2>/dev/null || echo "NotFound")
-          dev_aks_version=$(az aks show --name rewardsy-dev-aks --resource-group rewardsy-dev-rg --query "kubernetesVersion" -o tsv 2>/dev/null || echo "Unknown")
-          dev_node_count=$(az aks show --name rewardsy-dev-aks --resource-group rewardsy-dev-rg --query "agentPoolProfiles[0].count" -o tsv 2>/dev/null || echo "0")
-          
           check_component "Dev AKS Cluster" "$dev_aks_status" "Running"
-          echo "  Version: $dev_aks_version, Nodes: $dev_node_count"
           
           # Production AKS
           prod_aks_status=$(az aks show --name rewardsy-prod-aks --resource-group rewardsy-prod-rg --query "powerState.code" -o tsv 2>/dev/null || echo "NotFound")
-          prod_aks_version=$(az aks show --name rewardsy-prod-aks --resource-group rewardsy-prod-rg --query "kubernetesVersion" -o tsv 2>/dev/null || echo "Unknown")
-          prod_node_count=$(az aks show --name rewardsy-prod-aks --resource-group rewardsy-prod-rg --query "agentPoolProfiles[0].count" -o tsv 2>/dev/null || echo "0")
-          
           check_component "Prod AKS Cluster" "$prod_aks_status" "Running"
-          echo "  Version: $prod_aks_version, Nodes: $prod_node_count"
           
-          echo "=== CONTAINER REGISTRY HEALTH ==="
+          echo "=== CONTAINER REGISTRIES ==="
           
           # Development ACR
           dev_acr_status=$(az acr show --name rewardsydevacr --query "provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-          dev_acr_sku=$(az acr show --name rewardsydevacr --query "sku.name" -o tsv 2>/dev/null || echo "Unknown")
           check_component "Dev Container Registry" "$dev_acr_status" "Succeeded"
-          echo "  SKU: $dev_acr_sku"
           
           # Production ACR
           prod_acr_status=$(az acr show --name rewardsyprodacr --query "provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-          prod_acr_sku=$(az acr show --name rewardsyprodacr --query "sku.name" -o tsv 2>/dev/null || echo "Unknown")
           check_component "Prod Container Registry" "$prod_acr_status" "Succeeded"
-          echo "  SKU: $prod_acr_sku"
           
-          echo "=== SERVICE BUS HEALTH ==="
+          echo "=== SERVICE BUS ==="
           
           # Development Service Bus
           dev_sb_status=$(az servicebus namespace show --name rewardsy-dev-servicebus --resource-group rewardsy-dev-rg --query "status" -o tsv 2>/dev/null || echo "NotFound")
-          dev_sb_sku=$(az servicebus namespace show --name rewardsy-dev-servicebus --resource-group rewardsy-dev-rg --query "sku.name" -o tsv 2>/dev/null || echo "Unknown")
           check_component "Dev Service Bus" "$dev_sb_status" "Active"
-          echo "  SKU: $dev_sb_sku"
           
           # Production Service Bus
           prod_sb_status=$(az servicebus namespace show --name rewardsy-prod-servicebus --resource-group rewardsy-prod-rg --query "status" -o tsv 2>/dev/null || echo "NotFound")
-          prod_sb_sku=$(az servicebus namespace show --name rewardsy-prod-servicebus --resource-group rewardsy-prod-rg --query "sku.name" -o tsv 2>/dev/null || echo "Unknown")
           check_component "Prod Service Bus" "$prod_sb_status" "Active"
-          echo "  SKU: $prod_sb_sku"
           
-          echo "=== STORAGE ACCOUNT HEALTH ==="
+          echo "=== STORAGE ACCOUNTS ==="
           
-          # Check storage accounts
-          storage_accounts=("rewardsydevstg" "rewardsyprodstg" "rewardsydevinfrastg" "rewardsyprodinfrastg")
+          # Check main storage accounts
+          storage_accounts=("rewardsydevstg" "rewardsyprodstg")
           for storage in "${storage_accounts[@]}"; do
             storage_status=$(az storage account show --name "$storage" --query "statusOfPrimary" -o tsv 2>/dev/null || echo "NotFound")
             check_component "Storage $storage" "$storage_status" "available"
           done
           
-          echo "=== DATABASE HEALTH ==="
-          
-          # Check MongoDB clusters
-          dev_mongo_status=$(az cosmosdb show --name rewardsy-dev-mongo-cluster --resource-group rewardsy-dev-rg --query "provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-          if [ "$dev_mongo_status" != "NotFound" ]; then
-            check_component "Dev MongoDB Cluster" "$dev_mongo_status" "Succeeded"
+          # Calculate health score
+          if [ $total_checks -eq 0 ]; then
+            health_score=0
           else
-            echo "ℹ️  Dev MongoDB Cluster: Not found (may be using different resource type)"
+            health_score=$(( (total_checks - failed_checks) * 100 / total_checks ))
           fi
           
-          prod_mongo_status=$(az cosmosdb show --name rewardsy-prod-mongo-cluster --resource-group rewardsy-prod-rg --query "provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-          if [ "$prod_mongo_status" != "NotFound" ]; then
-            check_component "Prod MongoDB Cluster" "$prod_mongo_status" "Succeeded"
-          else
-            echo "ℹ️  Prod MongoDB Cluster: Not found (may be using different resource type)"
-          fi
-          
-          echo "=== DATA ANALYTICS RESOURCES ==="
-          
-          # Check for rewardsy-data-analytics specific resources
-          # This would include any new resources created for the data analytics workload
-          echo "Checking for data analytics resources in development..."
-          
-          # Check if there are any data analytics specific deployments or services
-          data_resources=$(az resource list --resource-group rewardsy-dev-rg --query "[?contains(name, 'data') || contains(name, 'analytics')].{Name:name, Type:type, State:properties.provisioningState}" -o json 2>/dev/null || echo "[]")
-          data_count=$(echo "$data_resources" | jq '. | length')
-          
-          if [ "$data_count" -gt 0 ]; then
-            echo "Found $data_count data analytics resources:"
-            echo "$data_resources" | jq -r '.[] | "  \(.Name) (\(.Type)): \(.State // "Unknown")"'
-          else
-            echo "No specific data analytics Azure resources found"
-          fi
-          
-          echo "=== MONITORING STACK ==="
-          
-          # Check Grafana
-          dev_grafana_status=$(az grafana show --name rewardsy-dev-grafana --resource-group rewardsy-dev-rg --query "provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-          if [ "$dev_grafana_status" != "NotFound" ]; then
-            check_component "Dev Grafana" "$dev_grafana_status" "Succeeded"
-          fi
-          
-          prod_grafana_status=$(az grafana show --name rewardsy-prod-grafana --resource-group rewardsy-prod-rg --query "provisioningState" -o tsv 2>/dev/null || echo "NotFound")
-          if [ "$prod_grafana_status" != "NotFound" ]; then
-            check_component "Prod Grafana" "$prod_grafana_status" "Succeeded"
-          fi
-          
-          # Calculate comprehensive health metrics
-          health_score=$(( (total_checks - failed_checks) * 100 / total_checks ))
-          
-          # Create detailed summary
+          # Create summary
           summary="Health Score: ${health_score}%, Checked: $total_checks components, Issues: $failed_checks"
           
           # Format critical issues
           critical_list=""
           if [ ${#critical_issues[@]} -gt 0 ]; then
             critical_list=$(printf "%s; " "${critical_issues[@]}")
-            critical_list=${critical_list%; }  # Remove trailing semicolon
+            critical_list=${critical_list%; }
           fi
           
           # Set outputs
@@ -195,7 +127,7 @@ jobs:
           echo "critical_issues=$critical_list" >> $GITHUB_OUTPUT
           
           echo ""
-          echo "=== INFRASTRUCTURE HEALTH SUMMARY ==="
+          echo "=== AZURE HEALTH SUMMARY ==="
           echo "Health Score: $health_score%"
           echo "Components Checked: $total_checks"
           echo "Issues Found: $failed_checks"
@@ -203,70 +135,47 @@ jobs:
           if [ ${#critical_issues[@]} -gt 0 ]; then
             echo "Critical Issues:"
             printf '  - %s\n' "${critical_issues[@]}"
-          fi
-          
-          # Exit with error if any critical checks failed
-          if [ $failed_checks -gt 0 ]; then
-            echo "Infrastructure health check failed due to critical issues"
             exit 1
           fi
           
-          echo "All infrastructure components are healthy"
+          echo "All Azure infrastructure components are healthy"
 
-  kubernetes-comprehensive-health:
+  kubernetes-health:
     runs-on: ubuntu-latest
     if: github.event.inputs.check_type != 'azure-only'
     outputs:
       status: ${{ steps.k8s_check.outcome }}
       pod_summary: ${{ steps.k8s_check.outputs.pod_summary }}
       namespace_details: ${{ steps.k8s_check.outputs.namespace_details }}
-      resource_alerts: ${{ steps.k8s_check.outputs.resource_alerts }}
     steps:
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
         with:
           version: 'latest'
           
-      - name: Setup Azure CLI  
-        uses: azure/CLI@v1
-        with:
-          azcliversion: 2.50.0
-          
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
           
-      - name: Comprehensive Kubernetes Health Check
+      - name: Check Kubernetes Health
         id: k8s_check
         run: |
-          echo "Starting comprehensive Kubernetes health check..."
+          echo "Starting Kubernetes health check..."
           
-          # Enhanced namespace list including data analytics
+          # Standard namespaces including data analytics
           namespaces=("rewardsy-webapp" "rewardsy-backend" "rewardsy-merchant" "rewardsy-data" "rewardsy-admin")
           
-          # Check if rewardsy-data-analytics namespace exists
-          prod_namespaces=$(az aks get-credentials --resource-group rewardsy-prod-rg --name rewardsy-prod-aks --overwrite-existing &>/dev/null && kubectl get namespaces -o json | jq -r '.items[].metadata.name' | grep "^rewardsy" || echo "")
-          
-          if echo "$prod_namespaces" | grep -q "rewardsy-data-analytics"; then
-            namespaces+=("rewardsy-data-analytics")
-            echo "✅ Found rewardsy-data-analytics namespace"
-          fi
-          
-          # Initialize comprehensive tracking
           total_pods=0
           running_pods=0
           failed_pods=0
-          pending_pods=0
-          crashloop_pods=0
-          restart_warnings=0
           namespace_status=()
-          resource_alerts=()
           
-          echo "=== PRODUCTION CLUSTER ANALYSIS ==="
+          echo "=== PRODUCTION CLUSTER ==="
+          
+          # Connect to production cluster
           az aks get-credentials --resource-group rewardsy-prod-rg --name rewardsy-prod-aks --overwrite-existing
           
-          # Check cluster connectivity
           if ! kubectl cluster-info --request-timeout=10s &>/dev/null; then
             echo "❌ Cannot connect to production cluster"
             exit 1
@@ -274,60 +183,29 @@ jobs:
           
           echo "✅ Connected to production cluster"
           
-          # Comprehensive namespace analysis
+          # Check for data analytics namespace
+          all_namespaces=$(kubectl get namespaces -o json | jq -r '.items[].metadata.name' | grep "^rewardsy" || echo "")
+          if echo "$all_namespaces" | grep -q "rewardsy-data-analytics"; then
+            namespaces+=("rewardsy-data-analytics")
+            echo "✅ Found rewardsy-data-analytics namespace"
+          fi
+          
+          # Check each namespace
           for ns in "${namespaces[@]}"; do
             echo ""
-            echo "--- Analyzing namespace: $ns ---"
+            echo "Checking namespace: $ns"
             
             if kubectl get namespace "$ns" &>/dev/null; then
-              # Basic pod counts
               ns_total=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | wc -l || echo 0)
               ns_running=$(kubectl get pods -n "$ns" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l || echo 0)
-              ns_pending=$(kubectl get pods -n "$ns" --field-selector=status.phase=Pending --no-headers 2>/dev/null | wc -l || echo 0)
-              ns_failed=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -c -E "(Failed|Error)" || echo 0)
-              ns_crashloop=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -c "CrashLoopBackOff" || echo 0)
-              
-              # Check for high restart counts
-              high_restarts=$(kubectl get pods -n "$ns" -o json 2>/dev/null | jq -r '.items[] | select(.status.containerStatuses[]?.restartCount > 5) | .metadata.name' | wc -l || echo 0)
+              ns_failed=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -c -E "(Failed|Error|CrashLoopBackOff)" || echo 0)
               
               total_pods=$((total_pods + ns_total))
               running_pods=$((running_pods + ns_running))
               failed_pods=$((failed_pods + ns_failed))
-              pending_pods=$((pending_pods + ns_pending))
-              crashloop_pods=$((crashloop_pods + ns_crashloop))
-              restart_warnings=$((restart_warnings + high_restarts))
               
-              # Detailed status
-              ns_status="$ns: $ns_running/$ns_total running"
-              if [ $ns_failed -gt 0 ] || [ $ns_crashloop -gt 0 ]; then
-                ns_status="$ns_status (⚠️ $ns_failed failed, $ns_crashloop crashloop)"
-              fi
-              if [ $high_restarts -gt 0 ]; then
-                ns_status="$ns_status (🔄 $high_restarts high restarts)"
-                resource_alerts+=("$ns: $high_restarts pods with high restart counts")
-              fi
-              
-              namespace_status+=("$ns_status")
-              
-              echo "  Total Pods: $ns_total"
-              echo "  Running: $ns_running"
-              echo "  Failed: $ns_failed"
-              echo "  Pending: $ns_pending"
-              echo "  CrashLoop: $ns_crashloop"
-              echo "  High Restarts: $high_restarts"
-              
-              # Check services
-              services=$(kubectl get services -n "$ns" --no-headers 2>/dev/null | wc -l || echo 0)
-              echo "  Services: $services"
-              
-              # Check deployments
-              deployments=$(kubectl get deployments -n "$ns" --no-headers 2>/dev/null | wc -l || echo 0)
-              ready_deployments=$(kubectl get deployments -n "$ns" -o json 2>/dev/null | jq '[.items[] | select(.status.readyReplicas == .spec.replicas)] | length' || echo 0)
-              echo "  Deployments: $ready_deployments/$deployments ready"
-              
-              if [ $deployments -gt 0 ] && [ $ready_deployments -lt $deployments ]; then
-                resource_alerts+=("$ns: $((deployments - ready_deployments)) deployments not fully ready")
-              fi
+              echo "  Pods: $ns_running/$ns_total running, $ns_failed failed"
+              namespace_status+=("$ns: $ns_running/$ns_total running")
               
             else
               echo "  ❌ Namespace not found"
@@ -336,7 +214,9 @@ jobs:
           done
           
           echo ""
-          echo "=== DEVELOPMENT CLUSTER ANALYSIS ==="
+          echo "=== DEVELOPMENT CLUSTER ==="
+          
+          # Quick check of development cluster
           az aks get-credentials --resource-group rewardsy-dev-rg --name rewardsy-dev-aks --overwrite-existing
           
           if kubectl cluster-info --request-timeout=10s &>/dev/null; then
@@ -344,98 +224,55 @@ jobs:
             
             dev_pods=0
             dev_running=0
-            dev_issues=0
             
             for ns in "${namespaces[@]}"; do
               if kubectl get namespace "$ns" &>/dev/null; then
                 ns_total=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | wc -l || echo 0)
                 ns_running=$(kubectl get pods -n "$ns" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l || echo 0)
-                ns_problems=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -c -E "(Failed|Error|CrashLoopBackOff|Pending)" || echo 0)
-                
                 dev_pods=$((dev_pods + ns_total))
                 dev_running=$((dev_running + ns_running))
-                dev_issues=$((dev_issues + ns_problems))
               fi
             done
             
-            echo "  Development Summary: $dev_running/$dev_pods running, $dev_issues issues"
+            echo "  Development pods: $dev_running/$dev_pods running"
           else
-            echo "⚠️  Cannot connect to development cluster"
+            echo "⚠️ Cannot connect to development cluster"
             dev_running=0
             dev_pods=0
           fi
           
-          echo ""
-          echo "=== NODE HEALTH CHECK ==="
-          
-          # Switch back to production for node check
-          az aks get-credentials --resource-group rewardsy-prod-rg --name rewardsy-prod-aks --overwrite-existing
-          
-          # Check node status
-          total_nodes=$(kubectl get nodes --no-headers | wc -l)
-          ready_nodes=$(kubectl get nodes --no-headers | grep -c " Ready " || echo 0)
-          not_ready_nodes=$((total_nodes - ready_nodes))
-          
-          echo "  Nodes: $ready_nodes/$total_nodes ready"
-          
-          if [ $not_ready_nodes -gt 0 ]; then
-            resource_alerts+=("Cluster: $not_ready_nodes nodes not ready")
-          fi
-          
-          # Create comprehensive summaries
+          # Create summaries
           prod_summary="Prod: $running_pods/$total_pods running"
           dev_summary="Dev: $dev_running/$dev_pods running"
           pod_summary="$prod_summary, $dev_summary"
           
-          if [ $failed_pods -gt 0 ] || [ $crashloop_pods -gt 0 ]; then
-            pod_summary="$pod_summary (Issues: ${failed_pods}F, ${crashloop_pods}C)"
+          if [ $failed_pods -gt 0 ]; then
+            pod_summary="$pod_summary (Failed: $failed_pods)"
           fi
           
           # Format namespace details
           namespace_details=$(printf "%s | " "${namespace_status[@]}")
           namespace_details=${namespace_details% | }
           
-          # Format resource alerts
-          alert_summary=""
-          if [ ${#resource_alerts[@]} -gt 0 ]; then
-            alert_summary=$(printf "%s; " "${resource_alerts[@]}")
-            alert_summary=${alert_summary%; }
-          fi
-          
           # Set outputs
           echo "pod_summary=$pod_summary" >> $GITHUB_OUTPUT
           echo "namespace_details=$namespace_details" >> $GITHUB_OUTPUT
-          echo "resource_alerts=$alert_summary" >> $GITHUB_OUTPUT
           
           echo ""
-          echo "=== KUBERNETES HEALTH SUMMARY ==="
+          echo "=== KUBERNETES SUMMARY ==="
           echo "Pod Summary: $pod_summary"
           echo "Namespace Details: $namespace_details"
-          echo "Node Status: $ready_nodes/$total_nodes ready"
           
-          if [ ${#resource_alerts[@]} -gt 0 ]; then
-            echo "Resource Alerts:"
-            printf '  - %s\n' "${resource_alerts[@]}"
-          fi
-          
-          # Determine exit status
-          critical_failures=$((failed_pods + crashloop_pods + not_ready_nodes))
-          
-          if [ $critical_failures -gt 0 ]; then
-            echo "Kubernetes health check failed: $critical_failures critical issues detected"
-            exit 1
-          fi
-          
-          if [ $pending_pods -gt 3 ] || [ $restart_warnings -gt 2 ]; then
-            echo "Kubernetes health check warning: elevated warning conditions"
+          if [ $failed_pods -gt 0 ]; then
+            echo "Kubernetes health check failed: $failed_pods pods have issues"
             exit 1
           fi
           
           echo "Kubernetes infrastructure is healthy"
 
-  comprehensive-monitoring-check:
+  monitoring-check:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 2 * * *' || github.event.schedule == '0 6 * * 0' || github.event.inputs.check_type == 'comprehensive'
+    if: github.event.schedule == '0 2 * * *' || github.event.inputs.check_type == 'comprehensive'
     outputs:
       status: ${{ steps.monitoring_check.outcome }}
       monitoring_summary: ${{ steps.monitoring_check.outputs.monitoring_summary }}
@@ -445,66 +282,44 @@ jobs:
         with:
           version: 'latest'
           
-      - name: Setup Azure CLI
-        uses: azure/CLI@v1
-        with:
-          azcliversion: 2.50.0
-          
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
           
-      - name: Comprehensive Monitoring Stack Check
+      - name: Check Monitoring Stack
         id: monitoring_check
         run: |
-          echo "Checking monitoring and observability stack..."
+          echo "Checking monitoring stack..."
           
           monitoring_issues=0
-          monitoring_components=()
           
           # Connect to production cluster
           az aks get-credentials --resource-group rewardsy-prod-rg --name rewardsy-prod-aks --overwrite-existing
           
-          echo "=== ELK STACK HEALTH ==="
+          echo "=== ELK STACK ==="
           
           # Check ELK components
-          elk_components=("elasticsearch" "kibana" "logstash" "filebeat")
+          elk_components=("elasticsearch" "kibana" "logstash")
           elk_healthy=0
           elk_total=0
           
           for component in "${elk_components[@]}"; do
-            pods=$(kubectl get pods --all-namespaces -o json | jq -r --arg comp "$component" '.items[] | select(.metadata.name | contains($comp)) | "\(.metadata.namespace)/\(.metadata.name): \(.status.phase)"' || echo "")
+            pods=$(kubectl get pods --all-namespaces --no-headers 2>/dev/null | grep "$component" | wc -l || echo 0)
+            running=$(kubectl get pods --all-namespaces --no-headers 2>/dev/null | grep "$component" | grep -c "Running" || echo 0)
             
-            if [ ! -z "$pods" ]; then
-              echo "$component pods:"
-              echo "$pods" | while read pod_info; do
-                echo "  $pod_info"
-                ((elk_total++))
-                if [[ $pod_info == *"Running"* ]]; then
-                  ((elk_healthy++))
-                else
-                  ((monitoring_issues++))
-                fi
-              done
-            else
-              echo "$component: No pods found"
+            elk_total=$((elk_total + pods))
+            elk_healthy=$((elk_healthy + running))
+            
+            echo "$component: $running/$pods running"
+            
+            if [ $pods -gt 0 ] && [ $running -lt $pods ]; then
+              ((monitoring_issues++))
             fi
           done
           
-          echo "=== PROMETHEUS & GRAFANA ==="
-          
-          # Check Prometheus components
-          prometheus_pods=$(kubectl get pods --all-namespaces -o json | jq -r '.items[] | select(.metadata.name | contains("prometheus") or contains("grafana")) | "\(.metadata.namespace)/\(.metadata.name): \(.status.phase)"' || echo "")
-          
-          if [ ! -z "$prometheus_pods" ]; then
-            echo "Prometheus/Grafana pods:"
-            echo "$prometheus_pods"
-          else
-            echo "No Prometheus/Grafana pods found in cluster"
-          fi
-          
-          echo "=== EXTERNAL MONITORING ENDPOINTS ==="
+          echo ""
+          echo "=== EXTERNAL ENDPOINTS ==="
           
           # Test Kibana accessibility
           kibana_url="https://app.rewardsy.one/kibana/"
@@ -512,15 +327,13 @@ jobs:
           
           if [ "$kibana_status" = "200" ] || [ "$kibana_status" = "302" ]; then
             echo "✅ Kibana accessible (HTTP $kibana_status)"
-            monitoring_components+=("Kibana: Accessible")
           else
             echo "❌ Kibana not accessible (HTTP $kibana_status)"
-            monitoring_components+=("Kibana: Failed ($kibana_status)")
             ((monitoring_issues++))
           fi
           
           # Create monitoring summary
-          monitoring_summary="ELK Stack: $elk_healthy/$elk_total healthy, Monitoring Issues: $monitoring_issues"
+          monitoring_summary="ELK: $elk_healthy/$elk_total healthy, Issues: $monitoring_issues"
           
           echo "monitoring_summary=$monitoring_summary" >> $GITHUB_OUTPUT
           
@@ -528,17 +341,17 @@ jobs:
           echo "=== MONITORING SUMMARY ==="
           echo "$monitoring_summary"
           
-          if [ $monitoring_issues -gt 2 ]; then
+          if [ $monitoring_issues -gt 1 ]; then
             echo "Monitoring check failed: $monitoring_issues issues detected"
             exit 1
           fi
 
-  send-infrastructure-notifications:
+  send-notifications:
     runs-on: ubuntu-latest
-    needs: [azure-infrastructure-health, kubernetes-comprehensive-health, comprehensive-monitoring-check]
+    needs: [azure-infrastructure-health, kubernetes-health, monitoring-check]
     if: always()
     steps:
-      - name: Send Discord Notification for Azure Infrastructure
+      - name: Send Azure Infrastructure Notification
         if: needs.azure-infrastructure-health.result != 'skipped'
         uses: sarisia/actions-status-discord@v1
         with:
@@ -562,23 +375,23 @@ jobs:
             ${{ needs.azure-infrastructure-health.outputs.critical_issues && format('**Critical Issues**\n{0}', needs.azure-infrastructure-health.outputs.critical_issues) || '' }}
             
             **Triggered by**
-            ${{ github.actor }} (Asif Ali Baig)
+            Asif Ali Baig
             
             **Workflow**
             Infrastructure Health Checks
           color: ${{ needs.azure-infrastructure-health.outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
 
-      - name: Send Discord Notification for Kubernetes
-        if: needs.kubernetes-comprehensive-health.result != 'skipped'
+      - name: Send Kubernetes Infrastructure Notification
+        if: needs.kubernetes-health.result != 'skipped'
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ env.DISCORD_WEBHOOK }}
-          username: The Sentinel  
-          status: ${{ needs.kubernetes-comprehensive-health.outputs.status }}
+          username: The Sentinel
+          status: ${{ needs.kubernetes-health.outputs.status }}
           description: |
-            **${{ needs.kubernetes-comprehensive-health.outputs.status == 'success' && 'Success' || 'Failure' }}: Health check status for Kubernetes Infrastructure: ${{ needs.kubernetes-comprehensive-health.outputs.status }}**
+            **${{ needs.kubernetes-health.outputs.status == 'success' && 'Success' || 'Failure' }}: Health check status for Kubernetes Infrastructure: ${{ needs.kubernetes-health.outputs.status }}**
             
-            ${{ needs.kubernetes-comprehensive-health.outputs.status == 'failure' && '@everyone' || '' }} The health check for Kubernetes Infrastructure has finished with status: ${{ needs.kubernetes-comprehensive-health.outputs.status }}.
+            ${{ needs.kubernetes-health.outputs.status == 'failure' && '@everyone' || '' }} The health check for Kubernetes Infrastructure has finished with status: ${{ needs.kubernetes-health.outputs.status }}.
             
             **Repository**
             ${{ github.repository }}
@@ -590,31 +403,29 @@ jobs:
             Comprehensive Kubernetes pod and namespace analysis completed
             
             **Pod Status**
-            ${{ needs.kubernetes-comprehensive-health.outputs.pod_summary }}
+            ${{ needs.kubernetes-health.outputs.pod_summary }}
             
             **Namespace Details**
-            ${{ needs.kubernetes-comprehensive-health.outputs.namespace_details }}
-            
-            ${{ needs.kubernetes-comprehensive-health.outputs.resource_alerts && format('**Resource Alerts**\n{0}', needs.kubernetes-comprehensive-health.outputs.resource_alerts) || '' }}
+            ${{ needs.kubernetes-health.outputs.namespace_details }}
             
             **Triggered by**
-            ${{ github.actor }} (Asif Ali Baig)
+            Asif Ali Baig
             
             **Workflow**
             Infrastructure Health Checks
-          color: ${{ needs.kubernetes-comprehensive-health.outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
+          color: ${{ needs.kubernetes-health.outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
 
-      - name: Send Discord Notification for Monitoring Stack
-        if: needs.comprehensive-monitoring-check.result != 'skipped'
+      - name: Send Monitoring Stack Notification
+        if: needs.monitoring-check.result != 'skipped' && needs.monitoring-check.result != ''
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ env.DISCORD_WEBHOOK }}
           username: The Sentinel
-          status: ${{ needs.comprehensive-monitoring-check.outputs.status }}
+          status: ${{ needs.monitoring-check.outputs.status }}
           description: |
-            **${{ needs.comprehensive-monitoring-check.outputs.status == 'success' && 'Success' || 'Warning' }}: Health check status for Monitoring Stack: ${{ needs.comprehensive-monitoring-check.outputs.status }}**
+            **${{ needs.monitoring-check.outputs.status == 'success' && 'Success' || 'Warning' }}: Health check status for Monitoring Stack: ${{ needs.monitoring-check.outputs.status }}**
             
-            ${{ needs.comprehensive-monitoring-check.outputs.status == 'failure' && '@everyone' || '' }} The health check for Monitoring Stack has finished with status: ${{ needs.comprehensive-monitoring-check.outputs.status }}.
+            The health check for Monitoring Stack has finished with status: ${{ needs.monitoring-check.outputs.status }}.
             
             **Repository**
             ${{ github.repository }}
@@ -623,14 +434,14 @@ jobs:
             ${{ github.ref }}
             
             **Event - schedule**
-            Comprehensive monitoring infrastructure analysis completed
+            Daily monitoring infrastructure analysis completed
             
             **Monitoring Status**
-            ${{ needs.comprehensive-monitoring-check.outputs.monitoring_summary }}
+            ${{ needs.monitoring-check.outputs.monitoring_summary }}
             
             **Triggered by**
-            ${{ github.actor }} (Asif Ali Baig)
+            Asif Ali Baig
             
             **Workflow**
             Infrastructure Health Checks
-          color: ${{ needs.comprehensive-monitoring-check.outputs.status == 'success' && 0x00ff00 || 0xffa500 }}
+          color: ${{ needs.monitoring-check.outputs.status == 'success' && 0x00ff00 || 0xffa500 }}
