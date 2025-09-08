@@ -847,43 +847,6 @@ jobs:
     needs: [azure-infrastructure-health, application-health, database-health, kubernetes-health, monitoring-check]
     if: always()
     steps:
-      - name: Calculate Overall Health Score
-        id: calculate_health
-        run: |
-          # Calculate weighted overall health score
-          azure_score="${{ needs.azure-infrastructure-health.outputs.health_score || '0' }}"
-          app_score="${{ needs.application-health.outputs.app_health_score || '0' }}"
-          k8s_status="${{ needs.kubernetes-health.outputs.status }}"
-          
-          # Convert K8s status to score
-          if [ "$k8s_status" = "success" ]; then
-            k8s_score=100
-          else
-            k8s_score=0
-          fi
-          
-          # Weighted calculation (Azure: 30%, App: 40%, K8s: 30%)
-          overall_score=$(( (azure_score * 30 + app_score * 40 + k8s_score * 30) / 100 ))
-          
-          # Determine overall status
-          if [ $overall_score -ge 90 ]; then
-            overall_status="🟢 EXCELLENT"
-            status_color="0x00ff00"
-          elif [ $overall_score -ge 75 ]; then
-            overall_status="🟡 GOOD"
-            status_color="0xffff00"
-          elif [ $overall_score -ge 50 ]; then
-            overall_status="🟠 WARNING"
-            status_color="0xff9900"
-          else
-            overall_status="🔴 CRITICAL"
-            status_color="0xff0000"
-          fi
-          
-          echo "overall_score=$overall_score" >> $GITHUB_OUTPUT
-          echo "overall_status=$overall_status" >> $GITHUB_OUTPUT
-          echo "status_color=$status_color" >> $GITHUB_OUTPUT
-
       - name: Send Comprehensive Health Report
         uses: sarisia/actions-status-discord@v1
         with:
