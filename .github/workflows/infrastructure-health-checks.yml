@@ -1,4 +1,4 @@
-name: Infrastructure Health Checks - Enhanced
+name: Infrastructure Health Checks
 
 on:
   schedule:
@@ -906,7 +906,7 @@ jobs:
             **Repository:** ${{ github.repository }}
             **Trigger:** ${{ github.event_name }} ${{ github.event.inputs.check_type && format('({0})', github.event.inputs.check_type) || '' }}
             **Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            **Executed by:** Asif Ali Baig (DevOps Engineer)
+            **Executed by:** Asif Ali Baig (DevOps)
             
             ${{ github.event.inputs.check_type == 'debug' && '**🔧 Debug Information Available in Job Logs**' || '' }}
           color: ${{ steps.overall_status.outputs.status_color }}
