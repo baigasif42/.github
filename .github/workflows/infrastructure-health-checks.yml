@@ -903,7 +903,7 @@ jobs:
             ${{ needs.application-health.outputs.app_summary || 'Skipped' }}
             ${{ needs.application-health.outputs.failed_endpoints && format('❌ Failed: {0}', needs.application-health.outputs.failed_endpoints) || '' }}
             
-            **💾 Database Status**
+            **💾 Data & Storage Systems**
             ${{ needs.database-health.outputs.db_summary || 'Skipped' }}
             ${{ needs.database-health.outputs.db_issues && format('⚠️ Issues: {0}', needs.database-health.outputs.db_issues) || '' }}
             
@@ -913,8 +913,20 @@ jobs:
             **📈 Monitoring Stack**
             ${{ needs.monitoring-check.outputs.monitoring_summary || 'Not checked (scheduled only)' }}
             
-            **🔍 Response Times**
+            **🔍 Response Times & Details**
             ${{ needs.application-health.outputs.response_times || 'No data available' }}
+            
+            **📋 Infrastructure Notes**
+            • **Dev Environment**: DNS issues detected - monitoring via LoadBalancer IPs
+            • **Production**: Partial deployment - merchant/admin services missing pods
+            • **Backend Routing**: Known 404 issue on prod backend endpoints
+            • **ELK Stack**: Operational in both environments (rewardsy-backend namespace)
+            
+            ---
+            **📊 Environment Summary**
+            **Production**: ✅ Domain working, ⚠️ Missing services (merchant, admin)
+            **Development**: ⚠️ DNS timeout issues, ✅ All services running
+            **Database**: ❌ No MongoDB found, ✅ Redis + Service Bus + Storage operational
             
             ---
             **📋 Report Details**
@@ -952,6 +964,7 @@ jobs:
             **🔗 Quick Links:**
             • [Azure Portal](https://portal.azure.com)
             • [Production Kibana](https://app.rewardsy.one/kibana/)
+            • [GitHub Actions](https://github.com/${{ github.repository }}/actions)
             
             **📞 Escalation Path:**
             1. DevOps Team Lead
