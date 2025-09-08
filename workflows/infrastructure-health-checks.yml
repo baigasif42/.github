@@ -1,4 +1,4 @@
-name: Infrastructure Health Checks - Enhanced
+name: Infrastructure Health Checks
 
 on:
   schedule:
@@ -18,7 +18,6 @@ on:
         - comprehensive
         - azure-only
         - kubernetes-only
-        - application-only
         - debug
 
 env:
@@ -27,7 +26,7 @@ env:
 jobs:
   azure-infrastructure-health:
     runs-on: ubuntu-latest
-    if: github.event.inputs.check_type != 'kubernetes-only' && github.event.inputs.check_type != 'application-only'
+    if: github.event.inputs.check_type != 'kubernetes-only'
     outputs:
       status: ${{ steps.azure_check.outcome }}
       health_score: ${{ steps.azure_check.outputs.health_score }}
@@ -237,291 +236,9 @@ jobs:
           
           echo "Azure infrastructure health check completed successfully with score: $health_score%"
 
-  application-health:
-    runs-on: ubuntu-latest
-    if: github.event.inputs.check_type != 'azure-only' && github.event.inputs.check_type != 'kubernetes-only'
-    outputs:
-      status: ${{ steps.app_check.outcome }}
-      app_health_score: ${{ steps.app_check.outputs.app_health_score }}
-      response_times: ${{ steps.app_check.outputs.response_times }}
-      failed_endpoints: ${{ steps.app_check.outputs.failed_endpoints }}
-      app_summary: ${{ steps.app_check.outputs.app_summary }}
-    steps:
-      - name: Check Application Health
-        id: app_check
-        run: |
-          set +e
-          
-          echo "Starting application health checks..."
-          
-          # Define endpoints for both environments
-          declare -A endpoints=(
-            # Production endpoints
-            ["prod-webapp"]="https://app.rewardsy.one/"
-            ["prod-backend"]="https://app.rewardsy.one/rewardsy-backend/health"
-            ["prod-merchant"]="https://app.rewardsy.one/rewardsy-merchant/"
-            ["prod-data"]="https://app.rewardsy.one/rewardsy-data/"
-            ["prod-kibana"]="https://app.rewardsy.one/kibana/"
-            
-            # Development endpoints
-            ["dev-webapp"]="https://dev.app.rewardsy.one/"
-            ["dev-backend"]="https://dev.app.rewardsy.one/rewardsy-backend/health"
-            ["dev-merchant"]="https://dev.app.rewardsy.one/rewardsy-merchant/"
-            ["dev-data"]="https://dev.app.rewardsy.one/rewardsy-data/"
-            ["dev-kibana"]="https://dev.app.rewardsy.one/kibana/"
-          )
-          
-          # Tracking variables
-          total_endpoints=0
-          failed_endpoints=0
-          total_response_time=0
-          endpoint_results=()
-          failed_list=()
-          
-          echo ""
-          echo "=== APPLICATION ENDPOINT HEALTH CHECKS ==="
-          
-          for service_name in "${!endpoints[@]}"; do
-            endpoint="${endpoints[$service_name]}"
-            ((total_endpoints++))
-            
-            echo "Testing $service_name: $endpoint"
-            
-            # Perform health check with timeout
-            response=$(curl -s -o /dev/null -w "%{http_code}:%{time_total}:%{url_effective}" \
-              --max-time 30 \
-              --connect-timeout 10 \
-              --retry 2 \
-              --retry-delay 1 \
-              "$endpoint" 2>/dev/null || echo "000:30.000:$endpoint")
-            
-            # Parse response
-            http_code=$(echo "$response" | cut -d: -f1)
-            response_time=$(echo "$response" | cut -d: -f2)
-            tested_url=$(echo "$response" | cut -d: -f3-)
-            
-            # Convert response time to milliseconds
-            response_time_ms=$(echo "$response_time * 1000" | bc -l 2>/dev/null | cut -d. -f1)
-            
-            # Determine if endpoint is healthy
-            if [[ "$http_code" =~ ^[23] ]]; then
-              status="✅"
-              echo "  $status $service_name: HTTP $http_code (${response_time_ms}ms)"
-              endpoint_results+=("$service_name: OK (${response_time_ms}ms)")
-              total_response_time=$(echo "$total_response_time + $response_time" | bc -l)
-            elif [[ "$http_code" == "000" ]]; then
-              status="❌"
-              echo "  $status $service_name: Connection failed (timeout)"
-              ((failed_endpoints++))
-              endpoint_results+=("$service_name: Connection failed")
-              failed_list+=("$service_name")
-            else
-              status="⚠️"
-              echo "  $status $service_name: HTTP $http_code (${response_time_ms}ms)"
-              ((failed_endpoints++))
-              endpoint_results+=("$service_name: HTTP $http_code")
-              failed_list+=("$service_name")
-            fi
-          done
-          
-          echo ""
-          echo "=== APPLICATION HEALTH SUMMARY ==="
-          
-          # Calculate metrics
-          if [ $total_endpoints -gt 0 ]; then
-            app_health_score=$(( (total_endpoints - failed_endpoints) * 100 / total_endpoints ))
-            if [ $total_endpoints -gt $failed_endpoints ]; then
-              avg_response_time=$(echo "scale=0; $total_response_time * 1000 / ($total_endpoints - $failed_endpoints)" | bc -l)
-            else
-              avg_response_time=0
-            fi
-          else
-            app_health_score=0
-            avg_response_time=0
-          fi
-          
-          echo "Application Health Score: $app_health_score%"
-          echo "Total Endpoints: $total_endpoints"
-          echo "Failed Endpoints: $failed_endpoints"
-          echo "Average Response Time: ${avg_response_time}ms"
-          
-          # Create summary
-          app_summary="Health: ${app_health_score}%, Endpoints: $total_endpoints, Failed: $failed_endpoints, Avg Response: ${avg_response_time}ms"
-          
-          # Format response times
-          response_times=""
-          if [ ${#endpoint_results[@]} -gt 0 ]; then
-            response_times=$(printf "%s | " "${endpoint_results[@]}")
-            response_times=${response_times% | }
-          fi
-          
-          # Format failed endpoints
-          failed_endpoints_list=""
-          if [ ${#failed_list[@]} -gt 0 ]; then
-            failed_endpoints_list=$(printf "%s, " "${failed_list[@]}")
-            failed_endpoints_list=${failed_endpoints_list%, }
-          fi
-          
-          # Set outputs
-          {
-            echo "app_health_score=$app_health_score"
-            echo "response_times=$response_times"
-            echo "failed_endpoints=$failed_endpoints_list"
-            echo "app_summary=$app_summary"
-          } >> $GITHUB_OUTPUT
-          
-          # Fail if too many endpoints are down
-          if [ $app_health_score -lt 70 ]; then
-            echo "Application health check failed: Health score $app_health_score% is below threshold (70%)"
-            exit 1
-          fi
-          
-          echo "Application health check completed successfully"
-
-  database-health:
-    runs-on: ubuntu-latest
-    if: github.event.inputs.check_type != 'azure-only' && github.event.inputs.check_type != 'kubernetes-only'
-    outputs:
-      status: ${{ steps.db_check.outcome }}
-      db_summary: ${{ steps.db_check.outputs.db_summary }}
-      db_issues: ${{ steps.db_check.outputs.db_issues }}
-    steps:
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
-          
-      - name: Check Database Connectivity
-        id: db_check
-        run: |
-          set +e
-          
-          echo "Starting database connectivity checks..."
-          
-          db_issues=()
-          db_healthy=0
-          db_total=0
-          
-          echo ""
-          echo "=== MONGODB CLUSTERS ==="
-          
-          # Check MongoDB clusters
-          environments=("dev" "prod")
-          for env in "${environments[@]}"; do
-            cluster_name="rewardsy-${env}-mongo-cluster"
-            resource_group="rewardsy-${env}-rg"
-            
-            ((db_total++))
-            echo "Checking $env MongoDB cluster: $cluster_name"
-            
-            # Check if cluster exists and get status
-            cluster_status=$(az cosmosdb show --name "$cluster_name" --resource-group "$resource_group" --query 'documentEndpoint' -o tsv 2>/dev/null)
-            
-            if [ -n "$cluster_status" ] && [ "$cluster_status" != "null" ]; then
-              echo "  ✅ $env MongoDB: Endpoint available"
-              ((db_healthy++))
-              
-              # Try to get additional cluster information
-              cluster_state=$(az cosmosdb show --name "$cluster_name" --resource-group "$resource_group" --query 'provisioningState' -o tsv 2>/dev/null)
-              echo "  📊 $env MongoDB: State $cluster_state"
-              
-            else
-              echo "  ❌ $env MongoDB: Cluster not found or not accessible"
-              db_issues+=("$env MongoDB cluster unavailable")
-            fi
-          done
-          
-          echo ""
-          echo "=== QDRANT VECTOR DATABASE ==="
-          
-          ((db_total++))
-          
-          # Check Qdrant (note: this is a SaaS service, check if accessible)
-          qdrant_resource=$(az resource show --resource-group rewardsy-poc-rg --name rewardsy-poc-qdrant-db --resource-type "Microsoft.SaaS/resources" --query 'properties.status' -o tsv 2>/dev/null)
-          
-          if [ -n "$qdrant_resource" ] && [ "$qdrant_resource" != "null" ]; then
-            echo "  ✅ Qdrant Vector DB: Resource provisioned"
-            ((db_healthy++))
-          else
-            echo "  ⚠️ Qdrant Vector DB: Resource status unknown"
-            # Don't count as failure since it's SaaS
-            ((db_healthy++))
-          fi
-          
-          echo ""
-          echo "=== SERVICE BUS QUEUES ==="
-          
-          # Check Service Bus queues (message persistence)
-          for env in "${environments[@]}"; do
-            servicebus_name="rewardsy-${env}-servicebus"
-            resource_group="rewardsy-${env}-rg"
-            
-            ((db_total++))
-            echo "Checking $env Service Bus: $servicebus_name"
-            
-            # Get queue information
-            queue_info=$(az servicebus queue list --namespace-name "$servicebus_name" --resource-group "$resource_group" --query '[].{Name:name, Status:status, MessageCount:messageCount}' -o json 2>/dev/null)
-            
-            if [ -n "$queue_info" ] && [ "$queue_info" != "[]" ]; then
-              queue_count=$(echo "$queue_info" | jq length)
-              echo "  ✅ $env Service Bus: $queue_count queues operational"
-              ((db_healthy++))
-              
-              # Check for message backlogs
-              backlog_queues=$(echo "$queue_info" | jq -r '.[] | select(.MessageCount > 1000) | .Name' 2>/dev/null)
-              if [ -n "$backlog_queues" ]; then
-                echo "  ⚠️ $env Service Bus: High message count in queues: $backlog_queues"
-                db_issues+=("$env Service Bus high message backlog")
-              fi
-            else
-              echo "  ❌ $env Service Bus: No queues found or inaccessible"
-              db_issues+=("$env Service Bus queues unavailable")
-            fi
-          done
-          
-          echo ""
-          echo "=== DATABASE HEALTH SUMMARY ==="
-          
-          # Calculate database health score
-          if [ $db_total -gt 0 ]; then
-            db_health_score=$(( db_healthy * 100 / db_total ))
-          else
-            db_health_score=0
-          fi
-          
-          echo "Database Health Score: $db_health_score%"
-          echo "Healthy Components: $db_healthy/$db_total"
-          
-          # Create summary
-          db_summary="DB Health: ${db_health_score}%, Components: $db_healthy/$db_total"
-          if [ ${#db_issues[@]} -gt 0 ]; then
-            db_summary="$db_summary, Issues: ${#db_issues[@]}"
-          fi
-          
-          # Format issues
-          db_issues_list=""
-          if [ ${#db_issues[@]} -gt 0 ]; then
-            db_issues_list=$(printf "%s; " "${db_issues[@]}")
-            db_issues_list=${db_issues_list%; }
-          fi
-          
-          # Set outputs
-          {
-            echo "db_summary=$db_summary"
-            echo "db_issues=$db_issues_list"
-          } >> $GITHUB_OUTPUT
-          
-          echo "Database connectivity check completed"
-          
-          # Only fail if critical databases are completely down
-          if [ $db_health_score -lt 50 ]; then
-            echo "Database health check failed: Health score $db_health_score% is critically low"
-            exit 1
-          fi
-
   kubernetes-health:
     runs-on: ubuntu-latest
-    if: github.event.inputs.check_type != 'azure-only' && github.event.inputs.check_type != 'application-only'
+    if: github.event.inputs.check_type != 'azure-only'
     outputs:
       status: ${{ steps.k8s_check.outcome }}
       pod_summary: ${{ steps.k8s_check.outputs.pod_summary }}
@@ -842,142 +559,73 @@ jobs:
             exit 1
           fi
 
-  send-enhanced-notifications:
+  send-notifications:
     runs-on: ubuntu-latest
-    needs: [azure-infrastructure-health, application-health, database-health, kubernetes-health, monitoring-check]
+    needs: [azure-infrastructure-health, kubernetes-health, monitoring-check]
     if: always()
     steps:
-      - name: Calculate Overall Health Score
-        id: calculate_health
-        run: |
-          # Calculate weighted overall health score
-          azure_score="${{ needs.azure-infrastructure-health.outputs.health_score || '0' }}"
-          app_score="${{ needs.application-health.outputs.app_health_score || '0' }}"
-          k8s_status="${{ needs.kubernetes-health.outputs.status }}"
-          
-          # Convert K8s status to score
-          if [ "$k8s_status" = "success" ]; then
-            k8s_score=100
-          else
-            k8s_score=0
-          fi
-          
-          # Weighted calculation (Azure: 30%, App: 40%, K8s: 30%)
-          overall_score=$(( (azure_score * 30 + app_score * 40 + k8s_score * 30) / 100 ))
-          
-          # Determine overall status
-          if [ $overall_score -ge 90 ]; then
-            overall_status="🟢 EXCELLENT"
-            status_color="0x00ff00"
-          elif [ $overall_score -ge 75 ]; then
-            overall_status="🟡 GOOD"
-            status_color="0xffff00"
-          elif [ $overall_score -ge 50 ]; then
-            overall_status="🟠 WARNING"
-            status_color="0xff9900"
-          else
-            overall_status="🔴 CRITICAL"
-            status_color="0xff0000"
-          fi
-          
-          echo "overall_score=$overall_score" >> $GITHUB_OUTPUT
-          echo "overall_status=$overall_status" >> $GITHUB_OUTPUT
-          echo "status_color=$status_color" >> $GITHUB_OUTPUT
-
-      - name: Send Comprehensive Health Report
+      - name: Send Azure Infrastructure Notification
+        if: needs.azure-infrastructure-health.result != 'skipped'
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ env.DISCORD_WEBHOOK }}
-          username: "🏥 Rewardsy Health Monitor"
-          title: "${{ steps.calculate_health.outputs.overall_status }} - Infrastructure Health Report"
+          username: The Sentinel
+          status: ${{ needs.azure-infrastructure-health.outputs.status }}
           description: |
-            **📊 Overall Health Score: ${{ steps.calculate_health.outputs.overall_score }}%**
+            **${{ needs.azure-infrastructure-health.outputs.status == 'success' && '✅ Success' || '❌ Failure' }}: Azure Infrastructure Health Check**
             
-            ${{ contains(join(needs.*.result, ' '), 'failure') && '🚨 **CRITICAL ISSUES DETECTED** 🚨\n@everyone' || '' }}
+            ${{ needs.azure-infrastructure-health.outputs.status == 'failure' && '@everyone **CRITICAL INFRASTRUCTURE ISSUE**' || '' }}
             
-            **🏗️ Azure Infrastructure**
-            ${{ needs.azure-infrastructure-health.outputs.summary || 'Skipped' }}
-            ${{ needs.azure-infrastructure-health.outputs.critical_issues && format('❌ Issues: {0}', needs.azure-infrastructure-health.outputs.critical_issues) || '' }}
+            **Health Summary**
+            ${{ needs.azure-infrastructure-health.outputs.summary || 'No summary available' }}
             
-            **🌐 Application Health**
-            ${{ needs.application-health.outputs.app_summary || 'Skipped' }}
-            ${{ needs.application-health.outputs.failed_endpoints && format('❌ Failed: {0}', needs.application-health.outputs.failed_endpoints) || '' }}
+            ${{ needs.azure-infrastructure-health.outputs.critical_issues && format('**🚨 Critical Issues:** {0}', needs.azure-infrastructure-health.outputs.critical_issues) || '' }}
             
-            **💾 Database Status**
-            ${{ needs.database-health.outputs.db_summary || 'Skipped' }}
-            ${{ needs.database-health.outputs.db_issues && format('⚠️ Issues: {0}', needs.database-health.outputs.db_issues) || '' }}
-            
-            **☸️ Kubernetes Clusters**
-            ${{ needs.kubernetes-health.outputs.pod_summary || 'Skipped' }}
-            
-            **📈 Monitoring Stack**
-            ${{ needs.monitoring-check.outputs.monitoring_summary || 'Not checked (scheduled only)' }}
-            
-            **🔍 Response Times**
-            ${{ needs.application-health.outputs.response_times || 'No data available' }}
-            
-            ---
-            **📋 Report Details**
             **Repository:** ${{ github.repository }}
-            **Trigger:** ${{ github.event_name }} ${{ github.event.inputs.check_type && format('({0})', github.event.inputs.check_type) || '' }}
-            **Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            **Executed by:** Asif Ali Baig (DevOps Engineer)
+            **Event:** ${{ github.event_name }} ${{ github.event.inputs.check_type && format('({0})', github.event.inputs.check_type) || '' }}
+            **Triggered by:** Asif Ali Baig
             
-            ${{ github.event.inputs.check_type == 'debug' && '**🔧 Debug Information Available in Job Logs**' || '' }}
-          color: ${{ steps.calculate_health.outputs.status_color }}
+            ${{ github.event.inputs.check_type == 'debug' && needs.azure-infrastructure-health.outputs.debug_info && format('**Debug Info:**\n```\n{0}\n```', needs.azure-infrastructure-health.outputs.debug_info) || '' }}
+          color: ${{ needs.azure-infrastructure-health.outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
 
-      - name: Send Critical Alert if Major Failure
-        if: contains(join(needs.*.result, ' '), 'failure')
+      - name: Send Kubernetes Infrastructure Notification
+        if: needs.kubernetes-health.result != 'skipped'
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ env.DISCORD_WEBHOOK }}
-          username: "🚨 CRITICAL ALERT"
-          title: "IMMEDIATE ATTENTION REQUIRED - Infrastructure Failure Detected"
+          username: The Sentinel
+          status: ${{ needs.kubernetes-health.outputs.status }}
           description: |
-            @everyone **CRITICAL INFRASTRUCTURE FAILURE**
+            **${{ needs.kubernetes-health.outputs.status == 'success' && '✅ Success' || '❌ Failure' }}: Kubernetes Infrastructure Health Check**
             
-            **🔥 Failed Components:**
-            ${{ needs.azure-infrastructure-health.result == 'failure' && '❌ Azure Infrastructure\n' || '' }}
-            ${{ needs.application-health.result == 'failure' && '❌ Application Services\n' || '' }}
-            ${{ needs.database-health.result == 'failure' && '❌ Database Systems\n' || '' }}
-            ${{ needs.kubernetes-health.result == 'failure' && '❌ Kubernetes Clusters\n' || '' }}
-            ${{ needs.monitoring-check.result == 'failure' && '❌ Monitoring Stack\n' || '' }}
+            ${{ needs.kubernetes-health.outputs.status == 'failure' && '@everyone **KUBERNETES CLUSTER ISSUE**' || '' }}
             
-            **⚡ Immediate Actions Required:**
-            1. Check Azure Portal for resource status
-            2. Verify Kubernetes cluster connectivity
-            3. Review application logs in Kibana
-            4. Contact on-call engineer if needed
+            **Pod Status**
+            ${{ needs.kubernetes-health.outputs.pod_summary || 'No pod information available' }}
             
-            **🔗 Quick Links:**
-            • [Azure Portal](https://portal.azure.com)
-            • [Production Kibana](https://app.rewardsy.one/kibana/)
+            **Namespace Details**
+            ${{ needs.kubernetes-health.outputs.namespace_details || 'No namespace details available' }}
             
-            **📞 Escalation Path:**
-            1. DevOps Team Lead
-            2. Platform Engineering
-            3. Technical Leadership
-          color: 0xff0000
-
-      - name: Send Success Summary (High-level stakeholders)
-        if: steps.calculate_health.outputs.overall_score >= 90
+            **Repository:** ${{ github.repository }}
+            **Event:** ${{ github.event_name }} ${{ github.event.inputs.check_type && format('({0})', github.event.inputs.check_type) || '' }}
+            **Triggered by:** Asif Ali Baig
+            
+            ${{ github.event.inputs.check_type == 'debug' && needs.kubernetes-health.outputs.debug_info && format('**Debug Info:**\n```\n{0}\n```', needs.kubernetes-health.outputs.debug_info) || '' }}
+          color: ${{ needs.kubernetes-health.outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
+      - name: Send Monitoring Stack Notification
+        if: needs.monitoring-check.result != 'skipped' && needs.monitoring-check.result != ''
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ env.DISCORD_WEBHOOK }}
-          username: "✅ Platform Status"
-          title: "🎯 All Systems Operational - Health Check Complete"
+          username: The Sentinel
+          status: ${{ needs.monitoring-check.outputs.status }}
           description: |
-            **🏆 Excellent Health Score: ${{ steps.calculate_health.outputs.overall_score }}%**
+            **${{ needs.monitoring-check.outputs.status == 'success' && '✅ Success' || '⚠️ Warning' }}: Monitoring Stack Health Check**
             
-            **System Summary:**
-            • Azure Infrastructure: ✅ Healthy
-            • Applications: ✅ All endpoints responding
-            • Databases: ✅ Operational
-            • Kubernetes: ✅ All pods running
-            • Monitoring: ✅ Active
+            **Monitoring Status**
+            ${{ needs.monitoring-check.outputs.monitoring_summary || 'No monitoring information available' }}
             
-            **📊 Performance Metrics:**
-            Average Response Time: ${{ needs.application-health.outputs.response_times }}
-            
-            **Next Check:** ${{ github.event.schedule && 'Automated in 4 hours' || 'Manual execution' }}
-          color: 0x00ff00
+            **Repository:** ${{ github.repository }}
+            **Event:** ${{ github.event_name }} ${{ github.event.inputs.check_type && format('({0})', github.event.inputs.check_type) || '' }}
+            **Triggered by:** Asif Ali Baig
+          color: ${{ needs.monitoring-check.outputs.status == 'success' && 0x00ff00 || 0xffa500 }}
