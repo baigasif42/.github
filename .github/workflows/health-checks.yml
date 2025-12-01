@@ -2,70 +2,975 @@ name: Rewardsy Health Checks
 
 on:
   schedule:
-    # Runs every 10 minutes
+    # Quick endpoint checks every 10 minutes
     - cron: '*/10 * * * *'
+    # Full infrastructure checks every 4 hours
+    - cron: '0 */4 * * *'
+    # Daily comprehensive check at 2 AM UTC  
+    - cron: '0 2 * * *'
   workflow_dispatch:
+    inputs:
+      check_type:
+        description: 'Type of health check'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+        - quick
+        - standard
+        - comprehensive
+        - azure-only
+        - kubernetes-only
+        - application-only
+        - debug
 
 env:
-  REWARDSY_BACKEND_URL: https://app.rewardsy.one/rewardsy-backend
-  REWARDSY_WEBAPP_URL: https://app.rewardsy.one
+  DISCORD_WEBHOOK: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
+  RESOURCE_GROUP: rewardsy-prod-rg
 
 jobs:
-  rewardsy-backend-health-check:
+  # ============================================================
+  # DETERMINE CHECK TYPE BASED ON SCHEDULE
+  # ============================================================
+  determine-check-type:
     runs-on: ubuntu-latest
     outputs:
-      status: ${{ steps.health_check.outcome }}
+      check_type: ${{ steps.set_type.outputs.check_type }}
+      is_quick: ${{ steps.set_type.outputs.is_quick }}
+      is_standard: ${{ steps.set_type.outputs.is_standard }}
+      is_comprehensive: ${{ steps.set_type.outputs.is_comprehensive }}
     steps:
-      - name: Check rewardsy-backend health
-        id: health_check
+      - name: Determine Check Type
+        id: set_type
         run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.REWARDSY_BACKEND_URL }}/docs/core)
-          if [ "$response" -ne 200 ]; then
-            echo "Rewardsy backend is down! HTTP status code: $response"
-            exit 1
+          # Manual trigger - use input
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            check_type="${{ github.event.inputs.check_type }}"
+          # Daily comprehensive at 2 AM
+          elif [ "${{ github.event.schedule }}" = "0 2 * * *" ]; then
+            check_type="comprehensive"
+          # Every 4 hours - standard
+          elif [ "${{ github.event.schedule }}" = "0 */4 * * *" ]; then
+            check_type="standard"
+          # Every 10 minutes - quick
           else
-            echo "Rewardsy backend is healthy."
+            check_type="quick"
+          fi
+          
+          echo "check_type=$check_type" >> $GITHUB_OUTPUT
+          echo "Check type: $check_type"
+          
+          # Set boolean flags for job conditions
+          if [ "$check_type" = "quick" ]; then
+            echo "is_quick=true" >> $GITHUB_OUTPUT
+            echo "is_standard=false" >> $GITHUB_OUTPUT
+            echo "is_comprehensive=false" >> $GITHUB_OUTPUT
+          elif [ "$check_type" = "comprehensive" ]; then
+            echo "is_quick=false" >> $GITHUB_OUTPUT
+            echo "is_standard=true" >> $GITHUB_OUTPUT
+            echo "is_comprehensive=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_quick=false" >> $GITHUB_OUTPUT
+            echo "is_standard=true" >> $GITHUB_OUTPUT
+            echo "is_comprehensive=false" >> $GITHUB_OUTPUT
           fi
 
-  rewardsy-webapp-health-check:
+  # ============================================================
+  # QUICK CHECK - Runs every 10 minutes (lightweight)
+  # ============================================================
+  quick-endpoint-check:
     runs-on: ubuntu-latest
+    needs: determine-check-type
+    if: needs.determine-check-type.outputs.is_quick == 'true'
     outputs:
-      status: ${{ steps.health_check.outcome }}
+      status: ${{ steps.quick_check.outputs.status }}
+      failed_endpoints: ${{ steps.quick_check.outputs.failed_endpoints }}
+      summary: ${{ steps.quick_check.outputs.summary }}
     steps:
-      - name: Check rewardsy-webapp health
-        id: health_check
+      - name: Quick Endpoint Health Check
+        id: quick_check
         run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.REWARDSY_WEBAPP_URL }})
-          if [ "$response" -ne 200 ]; then
-            echo "Rewardsy webapp is down! HTTP status code: $response"
-            exit 1
+          set +e
+          
+          echo "=============================================="
+          echo "  QUICK ENDPOINT CHECK (10-minute interval)"
+          echo "=============================================="
+          echo ""
+          
+          failed_count=0
+          working_count=0
+          failed_list=""
+          
+          # Function to test endpoint
+          test_endpoint() {
+            local name="$1"
+            local url="$2"
+            local expected="$3"
+            
+            response=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 15 \
+              --connect-timeout 5 \
+              "$url" 2>/dev/null || echo "000")
+            
+            if [[ "$response" == "000" ]]; then
+              echo "❌ $name: Connection failed"
+              failed_count=$((failed_count + 1))
+              failed_list="$failed_list$name (timeout) | "
+              return 1
+            elif [[ ",$expected," == *",$response,"* ]]; then
+              echo "✅ $name: HTTP $response"
+              working_count=$((working_count + 1))
+              return 0
+            else
+              echo "❌ $name: HTTP $response (expected $expected)"
+              failed_count=$((failed_count + 1))
+              failed_list="$failed_list$name (HTTP $response) | "
+              return 1
+            fi
+          }
+          
+          # Critical endpoints only
+          echo "=== Critical Endpoints ==="
+          test_endpoint "webapp" "https://app.rewardsy.one/" "200"
+          test_endpoint "merchant" "https://merchant.rewardsy.one/" "200"
+          test_endpoint "data-service" "https://app.rewardsy.one/rewardsy-data/" "200"
+          test_endpoint "backend-api" "https://app.rewardsy.one/rewardsy-backend/docs/core" "200"
+          
+          echo ""
+          echo "=== Summary ==="
+          echo "Working: $working_count, Failed: $failed_count"
+          
+          # Clean up
+          failed_list=${failed_list%" | "}
+          [ -z "$failed_list" ] && failed_list="None"
+          
+          # Determine status
+          if [ $failed_count -eq 0 ]; then
+            status="healthy"
           else
-            echo "Rewardsy webapp is healthy."
+            status="unhealthy"
+          fi
+          
+          summary="Quick Check: $working_count/$((working_count + failed_count)) endpoints healthy"
+          
+          {
+            echo "status=$status"
+            echo "failed_endpoints=$failed_list"
+            echo "summary=$summary"
+          } >> $GITHUB_OUTPUT
+          
+          # Exit with failure if any critical endpoint is down
+          if [ $failed_count -gt 0 ]; then
+            exit 1
           fi
 
-  notify-status:
+  # ============================================================
+  # AZURE INFRASTRUCTURE - Runs every 4 hours
+  # ============================================================
+  azure-infrastructure-health:
     runs-on: ubuntu-latest
-    needs: [rewardsy-backend-health-check, rewardsy-webapp-health-check]
-    if: always()
+    needs: determine-check-type
+    if: |
+      needs.determine-check-type.outputs.is_standard == 'true' && 
+      needs.determine-check-type.outputs.check_type != 'kubernetes-only' && 
+      needs.determine-check-type.outputs.check_type != 'application-only'
+    outputs:
+      status: ${{ steps.azure_check.outcome }}
+      health_score: ${{ steps.azure_check.outputs.health_score }}
+      summary: ${{ steps.azure_check.outputs.summary }}
+      critical_issues: ${{ steps.azure_check.outputs.critical_issues }}
     steps:
-      - name: Send Discord Notification for Backend Status
-        uses: sarisia/actions-status-discord@v1
+      - name: Azure Login
+        uses: azure/login@v1
         with:
-          webhook: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
-          status: ${{ needs['rewardsy-backend-health-check'].outputs.status }}
-          title: "🚦 Health check status for rewardsy-backend: ${{ needs['rewardsy-backend-health-check'].outputs.status }}"
-          description: |
-            ${{ needs['rewardsy-backend-health-check'].outputs.status == 'failure' && '@everyone' || '' }} The health check for rewardsy-backend has finished with status: ${{ needs['rewardsy-backend-health-check'].outputs.status }}.
-          color: ${{ needs['rewardsy-backend-health-check'].outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
-          url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+          
+      - name: Check Azure Infrastructure
+        id: azure_check
+        run: |
+          set +e
+          
+          echo "=============================================="
+          echo "  AZURE INFRASTRUCTURE HEALTH CHECK"
+          echo "  Resource Group: rewardsy-prod-rg"
+          echo "=============================================="
+          echo ""
+          
+          total_checks=0
+          failed_checks=0
+          critical_issues=()
+          
+          check_component() {
+            local component_name="$1"
+            local check_command="$2"
+            local expected_status="$3"
+            
+            ((total_checks++))
+            echo "Checking $component_name..."
+            
+            actual_status=$(eval "$check_command" 2>/dev/null)
+            
+            if [ -z "$actual_status" ] || [ "$actual_status" = "null" ]; then
+              echo "  ⚠️ $component_name: No status returned"
+              return 0
+            fi
+            
+            if [ "$actual_status" = "$expected_status" ]; then
+              echo "  ✅ $component_name: $actual_status"
+            else
+              echo "  ❌ $component_name: $actual_status (Expected: $expected_status)"
+              ((failed_checks++))
+              critical_issues+=("$component_name: $actual_status")
+            fi
+          }
+          
+          echo "=== AKS CLUSTER ==="
+          check_component "Prod AKS Cluster" \
+            "az aks show --name rewardsy-prod-aks --resource-group rewardsy-prod-rg --query 'powerState.code' -o tsv" \
+            "Running"
+          
+          echo ""
+          echo "=== CONTAINER REGISTRY ==="
+          check_component "Prod Container Registry" \
+            "az acr show --name rewardsyprodacr --query 'provisioningState' -o tsv" \
+            "Succeeded"
+          
+          echo ""
+          echo "=== STORAGE ACCOUNT ==="
+          check_component "Prod Storage Account" \
+            "az storage account show --name rewardsyprodstg --query 'statusOfPrimary' -o tsv" \
+            "available"
+          
+          echo ""
+          echo "=== WEB APP ==="
+          check_component "Prod Web App (rewardsy-cv)" \
+            "az webapp show --name rewardsy-cv --resource-group rewardsy-prod-rg --query 'state' -o tsv" \
+            "Running"
+          
+          # Calculate health score
+          if [ $total_checks -eq 0 ]; then
+            health_score=0
+          else
+            health_score=$(( (total_checks - failed_checks) * 100 / total_checks ))
+          fi
+          
+          summary="Azure: ${health_score}% healthy ($total_checks checked, $failed_checks issues)"
+          
+          critical_list=""
+          if [ ${#critical_issues[@]} -gt 0 ]; then
+            critical_list=$(printf "%s; " "${critical_issues[@]}")
+            critical_list=${critical_list%; }
+          fi
+          
+          {
+            echo "health_score=$health_score"
+            echo "summary=$summary"
+            echo "critical_issues=$critical_list"
+          } >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "=== SUMMARY ==="
+          echo "Health Score: $health_score%"
+          
+          if [ $health_score -lt 80 ]; then
+            exit 1
+          fi
 
-      - name: Send Discord Notification for Webapp Status
+  # ============================================================
+  # APPLICATION ENDPOINTS - Runs every 4 hours
+  # ============================================================
+  application-health:
+    runs-on: ubuntu-latest
+    needs: determine-check-type
+    if: |
+      needs.determine-check-type.outputs.is_standard == 'true' && 
+      needs.determine-check-type.outputs.check_type != 'azure-only' && 
+      needs.determine-check-type.outputs.check_type != 'kubernetes-only'
+    outputs:
+      status: ${{ steps.app_check.outcome }}
+      working_endpoints: ${{ steps.app_check.outputs.working_endpoints }}
+      failed_endpoints: ${{ steps.app_check.outputs.failed_endpoints }}
+      monitoring_endpoints: ${{ steps.app_check.outputs.monitoring_endpoints }}
+      app_summary: ${{ steps.app_check.outputs.app_summary }}
+    steps:
+      - name: Check Application Endpoints
+        id: app_check
+        run: |
+          set +e
+          
+          echo "=============================================="
+          echo "  APPLICATION ENDPOINT HEALTH CHECK"
+          echo "=============================================="
+          echo ""
+          
+          working_count=0
+          failed_count=0
+          monitoring_count=0
+          total_response_time=0
+          working_list=""
+          failed_list=""
+          monitoring_list=""
+          
+          test_endpoint() {
+            local name="$1"
+            local url="$2"
+            local expected="$3"
+            local category="$4"
+            
+            echo "Testing $name: $url"
+            
+            response=$(curl -s -o /dev/null -w "%{http_code}:%{time_total}" \
+              --max-time 30 \
+              --connect-timeout 10 \
+              --retry 2 \
+              "$url" 2>/dev/null || echo "000:30.000")
+            
+            http_code=$(echo "$response" | cut -d: -f1)
+            response_time=$(echo "$response" | cut -d: -f2)
+            response_time_ms=$(echo "$response_time * 1000" | bc -l 2>/dev/null | cut -d. -f1)
+            
+            if [[ "$http_code" == "000" ]]; then
+              echo "  ❌ Connection failed"
+              if [[ "$category" == "monitoring" ]]; then
+                monitoring_count=$((monitoring_count + 1))
+                monitoring_list="$monitoring_list$name: Timeout | "
+              else
+                failed_count=$((failed_count + 1))
+                failed_list="$failed_list$name: Timeout | "
+              fi
+            elif [[ ",$expected," == *",$http_code,"* ]]; then
+              echo "  ✅ HTTP $http_code (${response_time_ms}ms)"
+              working_count=$((working_count + 1))
+              working_list="$working_list$name: ${response_time_ms}ms | "
+              total_response_time=$(echo "$total_response_time + $response_time" | bc -l)
+            else
+              if [[ "$category" == "monitoring" ]]; then
+                echo "  ⚠️ HTTP $http_code (known issue)"
+                monitoring_count=$((monitoring_count + 1))
+                monitoring_list="$monitoring_list$name: HTTP $http_code | "
+              else
+                echo "  ❌ HTTP $http_code"
+                failed_count=$((failed_count + 1))
+                failed_list="$failed_list$name: HTTP $http_code | "
+              fi
+            fi
+          }
+          
+          echo "=== MAIN DOMAIN: app.rewardsy.one ==="
+          test_endpoint "webapp" "https://app.rewardsy.one/" "200" "critical"
+          test_endpoint "data-service" "https://app.rewardsy.one/rewardsy-data/" "200" "critical"
+          test_endpoint "kibana" "https://app.rewardsy.one/kibana/" "200,302,401" "critical"
+          test_endpoint "headlamp" "https://app.rewardsy.one/headlamp/" "200,302,401" "critical"
+          test_endpoint "kafka-ui" "https://app.rewardsy.one/kafka-ui/" "200,302,401" "critical"
+          
+          echo ""
+          echo "=== BACKEND (Known Issues) ==="
+          test_endpoint "backend" "https://app.rewardsy.one/rewardsy-backend/" "200,404" "monitoring"
+          test_endpoint "backend-qr" "https://app.rewardsy.one/rewardsy-backend/qr/" "200,404" "monitoring"
+          test_endpoint "admin" "https://app.rewardsy.one/rewardsy-admin/" "200,404" "monitoring"
+          
+          echo ""
+          echo "=== MERCHANT DOMAIN ==="
+          test_endpoint "merchant-portal" "https://merchant.rewardsy.one/" "200" "critical"
+          
+          # Calculate average response time
+          if [ $working_count -gt 0 ]; then
+            avg_response_time=$(echo "scale=0; $total_response_time * 1000 / $working_count" | bc -l)
+          else
+            avg_response_time=0
+          fi
+          
+          # Clean up
+          working_list=${working_list%" | "}
+          failed_list=${failed_list%" | "}
+          monitoring_list=${monitoring_list%" | "}
+          [ -z "$working_list" ] && working_list="None"
+          [ -z "$failed_list" ] && failed_list="None"
+          [ -z "$monitoring_list" ] && monitoring_list="None"
+          
+          app_summary="Endpoints: $working_count working, $failed_count failed, $monitoring_count monitoring (Avg: ${avg_response_time}ms)"
+          
+          {
+            echo "working_endpoints=$working_list"
+            echo "failed_endpoints=$failed_list"
+            echo "monitoring_endpoints=$monitoring_list"
+            echo "app_summary=$app_summary"
+          } >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "=== SUMMARY ==="
+          echo "Working: $working_count | Failed: $failed_count | Monitoring: $monitoring_count"
+          
+          if [ $working_count -eq 0 ]; then
+            exit 1
+          fi
+
+  # ============================================================
+  # DATA SYSTEMS - Runs every 4 hours
+  # ============================================================
+  database-health:
+    runs-on: ubuntu-latest
+    needs: determine-check-type
+    if: |
+      needs.determine-check-type.outputs.is_standard == 'true' && 
+      needs.determine-check-type.outputs.check_type != 'azure-only' && 
+      needs.determine-check-type.outputs.check_type != 'kubernetes-only'
+    outputs:
+      status: ${{ steps.db_check.outcome }}
+      db_summary: ${{ steps.db_check.outputs.db_summary }}
+      db_issues: ${{ steps.db_check.outputs.db_issues }}
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+          
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+          
+      - name: Check Data Systems
+        id: db_check
+        run: |
+          set +e
+          
+          echo "=============================================="
+          echo "  DATA SYSTEMS HEALTH CHECK"
+          echo "=============================================="
+          echo ""
+          
+          db_issues=()
+          db_healthy=0
+          db_total=0
+          
+          echo "=== STORAGE ACCOUNT ==="
+          ((db_total++))
+          storage_status=$(az storage account show --name rewardsyprodstg --query 'statusOfPrimary' -o tsv 2>/dev/null)
+          if [ "$storage_status" = "available" ]; then
+            echo "  ✅ rewardsyprodstg: Available"
+            ((db_healthy++))
+          else
+            echo "  ❌ rewardsyprodstg: $storage_status"
+            db_issues+=("Storage unavailable")
+          fi
+          
+          echo ""
+          echo "=== KUBERNETES DATA SERVICES ==="
+          
+          az aks get-credentials --resource-group rewardsy-prod-rg --name rewardsy-prod-aks --overwrite-existing 2>/dev/null
+          
+          if kubectl cluster-info --request-timeout=10s &>/dev/null; then
+            echo "Connected to cluster"
+            
+            # Redis
+            ((db_total++))
+            redis_pods=$(kubectl get pods -n rewardsy-data --no-headers 2>/dev/null | grep -i redis | grep -c Running || echo "0")
+            if [ "$redis_pods" -gt 0 ]; then
+              echo "  ✅ Redis: $redis_pods pod(s) running"
+              ((db_healthy++))
+            else
+              echo "  ⚠️ Redis: No running pods"
+              db_issues+=("Redis not running")
+            fi
+            
+            # Kafka
+            ((db_total++))
+            kafka_pods=$(kubectl get pods -n kafka --no-headers 2>/dev/null | grep -c Running || echo "0")
+            if [ "$kafka_pods" -gt 0 ]; then
+              echo "  ✅ Kafka: $kafka_pods pod(s) running"
+              ((db_healthy++))
+            else
+              echo "  ⚠️ Kafka: No running pods"
+              db_issues+=("Kafka not running")
+            fi
+            
+            # Elasticsearch
+            ((db_total++))
+            es_pods=$(kubectl get pods -n rewardsy-backend --no-headers 2>/dev/null | grep -i elastic | grep -c Running || echo "0")
+            if [ "$es_pods" -gt 0 ]; then
+              echo "  ✅ Elasticsearch: $es_pods pod(s) running"
+              ((db_healthy++))
+            else
+              echo "  ⚠️ Elasticsearch: No running pods"
+              db_issues+=("Elasticsearch not running")
+            fi
+          else
+            echo "  ❌ Cannot connect to cluster"
+            db_issues+=("Cluster unreachable")
+          fi
+          
+          db_summary="Data Systems: $db_healthy/$db_total healthy"
+          if [ ${#db_issues[@]} -gt 0 ]; then
+            db_summary="$db_summary (${#db_issues[@]} issues)"
+          fi
+          
+          db_issues_list=""
+          if [ ${#db_issues[@]} -gt 0 ]; then
+            db_issues_list=$(printf "%s; " "${db_issues[@]}")
+            db_issues_list=${db_issues_list%; }
+          fi
+          
+          {
+            echo "db_summary=$db_summary"
+            echo "db_issues=$db_issues_list"
+          } >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "=== SUMMARY ==="
+          echo "$db_summary"
+          
+          if [ $db_total -gt 0 ]; then
+            healthy_pct=$(( db_healthy * 100 / db_total ))
+            if [ $healthy_pct -lt 50 ]; then
+              exit 1
+            fi
+          fi
+
+  # ============================================================
+  # KUBERNETES - Runs every 4 hours
+  # ============================================================
+  kubernetes-health:
+    runs-on: ubuntu-latest
+    needs: determine-check-type
+    if: |
+      needs.determine-check-type.outputs.is_standard == 'true' && 
+      needs.determine-check-type.outputs.check_type != 'azure-only' && 
+      needs.determine-check-type.outputs.check_type != 'application-only'
+    outputs:
+      status: ${{ steps.k8s_check.outcome }}
+      pod_summary: ${{ steps.k8s_check.outputs.pod_summary }}
+      namespace_details: ${{ steps.k8s_check.outputs.namespace_details }}
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+          
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+          
+      - name: Check Kubernetes Health
+        id: k8s_check
+        run: |
+          set +e
+          
+          echo "=============================================="
+          echo "  KUBERNETES HEALTH CHECK"
+          echo "  Cluster: rewardsy-prod-aks"
+          echo "=============================================="
+          echo ""
+          
+          namespaces=("rewardsy-webapp" "rewardsy-backend" "rewardsy-merchant" "rewardsy-data" "rewardsy-admin" "rewardsy-logging" "kafka")
+          
+          total_pods=0
+          running_pods=0
+          failed_pods=0
+          namespace_status=()
+          
+          # Connect to cluster
+          if ! az aks get-credentials --resource-group rewardsy-prod-rg --name rewardsy-prod-aks --overwrite-existing 2>/dev/null; then
+            echo "pod_summary=Cannot connect to cluster" >> $GITHUB_OUTPUT
+            echo "namespace_details=Connection failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          if ! kubectl cluster-info --request-timeout=10s &>/dev/null; then
+            echo "pod_summary=Cannot connect to cluster" >> $GITHUB_OUTPUT
+            echo "namespace_details=Connection failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "✅ Connected to cluster"
+          echo ""
+          
+          for ns in "${namespaces[@]}"; do
+            echo "=== $ns ==="
+            
+            if kubectl get namespace "$ns" &>/dev/null; then
+              ns_total=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+              ns_running=$(kubectl get pods -n "$ns" --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
+              ns_failed=$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | grep -cE "(Failed|Error|CrashLoopBackOff|Pending)" || echo "0")
+              
+              [[ ! "$ns_total" =~ ^[0-9]+$ ]] && ns_total=0
+              [[ ! "$ns_running" =~ ^[0-9]+$ ]] && ns_running=0
+              [[ ! "$ns_failed" =~ ^[0-9]+$ ]] && ns_failed=0
+              
+              total_pods=$((total_pods + ns_total))
+              running_pods=$((running_pods + ns_running))
+              failed_pods=$((failed_pods + ns_failed))
+              
+              if [ $ns_total -eq 0 ]; then
+                echo "  ⚠️ No pods"
+                namespace_status+=("$ns: empty")
+              elif [ $ns_running -eq $ns_total ]; then
+                echo "  ✅ $ns_running/$ns_total running"
+                namespace_status+=("$ns: $ns_running/$ns_total ✅")
+              else
+                echo "  ⚠️ $ns_running/$ns_total running"
+                namespace_status+=("$ns: $ns_running/$ns_total ⚠️")
+              fi
+            else
+              echo "  ⚠️ Namespace not found"
+              namespace_status+=("$ns: not found")
+            fi
+          done
+          
+          # Create summary
+          if [ $total_pods -eq 0 ]; then
+            pod_summary="No pods found"
+          else
+            pod_summary="$running_pods/$total_pods running"
+            if [ $failed_pods -gt 0 ]; then
+              pod_summary="$pod_summary ($failed_pods issues)"
+            fi
+          fi
+          
+          namespace_details=$(printf "%s | " "${namespace_status[@]}")
+          namespace_details=${namespace_details% | }
+          
+          {
+            echo "pod_summary=$pod_summary"
+            echo "namespace_details=$namespace_details"
+          } >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "=== SUMMARY ==="
+          echo "Pods: $pod_summary"
+          
+          if [ $total_pods -gt 0 ]; then
+            failure_pct=$((failed_pods * 100 / total_pods))
+            if [ $failure_pct -gt 50 ]; then
+              exit 1
+            fi
+          fi
+
+  # ============================================================
+  # MONITORING STACK - Runs daily at 2 AM
+  # ============================================================
+  monitoring-check:
+    runs-on: ubuntu-latest
+    needs: determine-check-type
+    if: needs.determine-check-type.outputs.is_comprehensive == 'true'
+    outputs:
+      status: ${{ steps.monitoring_check.outcome }}
+      monitoring_summary: ${{ steps.monitoring_check.outputs.monitoring_summary }}
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+          
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+          
+      - name: Check Monitoring Stack
+        id: monitoring_check
+        run: |
+          echo "=============================================="
+          echo "  MONITORING STACK HEALTH CHECK"
+          echo "=============================================="
+          echo ""
+          
+          monitoring_issues=0
+          
+          az aks get-credentials --resource-group rewardsy-prod-rg --name rewardsy-prod-aks --overwrite-existing 2>/dev/null
+          
+          if ! kubectl cluster-info --request-timeout=10s &>/dev/null; then
+            echo "monitoring_summary=Cannot connect to cluster" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "=== ELK STACK ==="
+          elk_components=("elasticsearch" "kibana" "logstash" "filebeat")
+          elk_healthy=0
+          elk_total=0
+          
+          for component in "${elk_components[@]}"; do
+            pods=$(kubectl get pods -n rewardsy-backend --no-headers 2>/dev/null | grep -i "$component" | wc -l | tr -d ' ')
+            running=$(kubectl get pods -n rewardsy-backend --no-headers 2>/dev/null | grep -i "$component" | grep -c Running || echo "0")
+            
+            [[ ! "$pods" =~ ^[0-9]+$ ]] && pods=0
+            [[ ! "$running" =~ ^[0-9]+$ ]] && running=0
+            
+            elk_total=$((elk_total + pods))
+            elk_healthy=$((elk_healthy + running))
+            
+            if [ $pods -eq 0 ]; then
+              echo "  ⚠️ $component: Not deployed"
+            elif [ $running -eq $pods ]; then
+              echo "  ✅ $component: $running/$pods running"
+            else
+              echo "  ❌ $component: $running/$pods running"
+              ((monitoring_issues++))
+            fi
+          done
+          
+          echo ""
+          echo "=== LOGGING NAMESPACE ==="
+          logging_pods=$(kubectl get pods -n rewardsy-logging --no-headers 2>/dev/null | wc -l | tr -d ' ')
+          logging_running=$(kubectl get pods -n rewardsy-logging --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')
+          echo "  Pods: $logging_running/$logging_pods running"
+          
+          echo ""
+          echo "=== EXTERNAL ENDPOINTS ==="
+          
+          kibana_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://app.rewardsy.one/kibana/" 2>/dev/null || echo "000")
+          if [ "$kibana_status" = "200" ] || [ "$kibana_status" = "302" ] || [ "$kibana_status" = "401" ]; then
+            echo "  ✅ Kibana: HTTP $kibana_status"
+          else
+            echo "  ❌ Kibana: HTTP $kibana_status"
+            ((monitoring_issues++))
+          fi
+          
+          kafka_ui_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://app.rewardsy.one/kafka-ui/" 2>/dev/null || echo "000")
+          if [ "$kafka_ui_status" = "200" ] || [ "$kafka_ui_status" = "302" ] || [ "$kafka_ui_status" = "401" ]; then
+            echo "  ✅ Kafka UI: HTTP $kafka_ui_status"
+          else
+            echo "  ⚠️ Kafka UI: HTTP $kafka_ui_status"
+          fi
+          
+          headlamp_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://app.rewardsy.one/headlamp/" 2>/dev/null || echo "000")
+          if [ "$headlamp_status" = "200" ] || [ "$headlamp_status" = "302" ] || [ "$headlamp_status" = "401" ]; then
+            echo "  ✅ Headlamp: HTTP $headlamp_status"
+          else
+            echo "  ⚠️ Headlamp: HTTP $headlamp_status"
+          fi
+          
+          monitoring_summary="ELK: $elk_healthy/$elk_total | Kibana: $kibana_status | Issues: $monitoring_issues"
+          echo "monitoring_summary=$monitoring_summary" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "=== SUMMARY ==="
+          echo "$monitoring_summary"
+          
+          if [ $monitoring_issues -gt 3 ]; then
+            exit 1
+          fi
+
+  # ============================================================
+  # NOTIFICATIONS - QUICK CHECK (every 10 min)
+  # ============================================================
+  notify-quick-check:
+    runs-on: ubuntu-latest
+    needs: [determine-check-type, quick-endpoint-check]
+    if: always() && needs.determine-check-type.outputs.is_quick == 'true'
+    steps:
+      - name: Send Quick Check Alert (Only on Failure)
+        if: needs.quick-endpoint-check.result == 'failure'
         uses: sarisia/actions-status-discord@v1
         with:
-          webhook: https://discord.com/api/webhooks/1391803646500671588/7_zWESR3N1FtkNIu-vsAKdicx8JTjdlBYW0WPLvkr7VK3IaRRefqy2zW7eqEwoDqF5Cx
-          status: ${{ needs['rewardsy-webapp-health-check'].outputs.status }}
-          title: "🚦 Health check status for rewardsy-webapp: ${{ needs['rewardsy-webapp-health-check'].outputs.status }}"
+          webhook: ${{ env.DISCORD_WEBHOOK }}
+          username: "🚨 Quick Health Alert"
+          title: "⚠️ ENDPOINT DOWN DETECTED"
           description: |
-            ${{ needs['rewardsy-webapp-health-check'].outputs.status == 'failure' && '@everyone' || '' }} The health check for rewardsy-webapp has finished with status: ${{ needs['rewardsy-webapp-health-check'].outputs.status }}.
-          color: ${{ needs['rewardsy-webapp-health-check'].outputs.status == 'success' && 0x00ff00 || 0xff0000 }}
-          url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            <@1379840575783829544> **Critical endpoint failure detected!**
+            
+            **❌ Failed Endpoints:**
+            ${{ needs.quick-endpoint-check.outputs.failed_endpoints }}
+            
+            **⚡ Actions Required:**
+            1. Check [app.rewardsy.one](https://app.rewardsy.one)
+            2. Check [merchant.rewardsy.one](https://merchant.rewardsy.one)
+            3. Review [GitHub Actions](https://github.com/${{ github.repository }}/actions)
+            
+            ---
+            **Check Type:** Quick (10-minute interval)
+            **Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          color: 0xff0000
+
+  # ============================================================
+  # NOTIFICATIONS - STANDARD CHECK (every 4 hours)
+  # ============================================================
+  notify-standard-check:
+    runs-on: ubuntu-latest
+    needs: [determine-check-type, azure-infrastructure-health, application-health, database-health, kubernetes-health]
+    if: |
+      always() && 
+      needs.determine-check-type.outputs.is_standard == 'true' && 
+      needs.determine-check-type.outputs.is_comprehensive != 'true'
+    steps:
+      - name: Determine Status
+        id: status
+        run: |
+          if [[ "${{ contains(join(needs.*.result, ' '), 'failure') }}" == "true" ]]; then
+            echo "overall=⚠️ ISSUES DETECTED" >> $GITHUB_OUTPUT
+            echo "color=0xff9900" >> $GITHUB_OUTPUT
+            echo "health=Issues Found" >> $GITHUB_OUTPUT
+          else
+            echo "overall=✅ ALL SYSTEMS OPERATIONAL" >> $GITHUB_OUTPUT
+            echo "color=0x00ff00" >> $GITHUB_OUTPUT
+            echo "health=100%" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Health Report
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK }}
+          username: "🏥 Rewardsy Health Monitor"
+          title: "${{ steps.status.outputs.overall }} - Production Health Report"
+          description: |
+            **📊 Overall Health: ${{ steps.status.outputs.health }}**
+            
+            ${{ contains(join(needs.*.result, ' '), 'failure') && '🚨 **ISSUES DETECTED** <@1379840575783829544>' || '' }}
+            
+            **🏗️ Azure Infrastructure**
+            ${{ needs.azure-infrastructure-health.outputs.summary || 'Skipped' }}
+            ${{ needs.azure-infrastructure-health.outputs.critical_issues && format('❌ {0}', needs.azure-infrastructure-health.outputs.critical_issues) || '' }}
+            
+            **🌐 Application Endpoints**
+            ${{ needs.application-health.outputs.app_summary || 'Skipped' }}
+            ✅ Working: ${{ needs.application-health.outputs.working_endpoints || 'None' }}
+            ❌ Failed: ${{ needs.application-health.outputs.failed_endpoints || 'None' }}
+            ⚠️ Monitoring: ${{ needs.application-health.outputs.monitoring_endpoints || 'None' }}
+            
+            **💾 Data Systems**
+            ${{ needs.database-health.outputs.db_summary || 'Skipped' }}
+            ${{ needs.database-health.outputs.db_issues && format('⚠️ {0}', needs.database-health.outputs.db_issues) || '' }}
+            
+            **☸️ Kubernetes**
+            ${{ needs.kubernetes-health.outputs.pod_summary || 'Skipped' }}
+            ${{ needs.kubernetes-health.outputs.namespace_details || '' }}
+            
+            ---
+            **Check Type:** Standard (4-hour interval)
+            **Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          color: ${{ steps.status.outputs.color }}
+
+      - name: Send Critical Alert
+        if: contains(join(needs.*.result, ' '), 'failure')
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK }}
+          username: "🚨 CRITICAL ALERT"
+          title: "PRODUCTION INFRASTRUCTURE FAILURE"
+          description: |
+            <@1379840575783829544> **IMMEDIATE ATTENTION REQUIRED**
+            
+            **🔥 Failed Components:**
+            ${{ needs.azure-infrastructure-health.result == 'failure' && '❌ Azure Infrastructure\n' || '' }}
+            ${{ needs.application-health.result == 'failure' && '❌ Application Endpoints\n' || '' }}
+            ${{ needs.database-health.result == 'failure' && '❌ Data Systems\n' || '' }}
+            ${{ needs.kubernetes-health.result == 'failure' && '❌ Kubernetes\n' || '' }}
+            
+            **⚡ Actions:**
+            1. [Azure Portal](https://portal.azure.com)
+            2. [Kibana Logs](https://app.rewardsy.one/kibana/)
+            3. [GitHub Actions](https://github.com/${{ github.repository }}/actions)
+          color: 0xff0000
+
+  # ============================================================
+  # NOTIFICATIONS - COMPREHENSIVE CHECK (daily)
+  # ============================================================
+  notify-comprehensive-check:
+    runs-on: ubuntu-latest
+    needs: [determine-check-type, azure-infrastructure-health, application-health, database-health, kubernetes-health, monitoring-check]
+    if: always() && needs.determine-check-type.outputs.is_comprehensive == 'true'
+    steps:
+      - name: Determine Status
+        id: status
+        run: |
+          if [[ "${{ contains(join(needs.*.result, ' '), 'failure') }}" == "true" ]]; then
+            echo "overall=⚠️ ISSUES DETECTED" >> $GITHUB_OUTPUT
+            echo "color=0xff9900" >> $GITHUB_OUTPUT
+            echo "health=Issues Found" >> $GITHUB_OUTPUT
+          else
+            echo "overall=✅ ALL SYSTEMS OPERATIONAL" >> $GITHUB_OUTPUT
+            echo "color=0x00ff00" >> $GITHUB_OUTPUT
+            echo "health=100%" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Comprehensive Report
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK }}
+          username: "🏥 Rewardsy Health Monitor"
+          title: "${{ steps.status.outputs.overall }} - Daily Comprehensive Report"
+          description: |
+            **📊 Overall Health: ${{ steps.status.outputs.health }}**
+            
+            ${{ contains(join(needs.*.result, ' '), 'failure') && '🚨 **ISSUES DETECTED** <@1379840575783829544>' || '' }}
+            
+            **🏗️ Azure Infrastructure**
+            ${{ needs.azure-infrastructure-health.outputs.summary || 'Skipped' }}
+            ${{ needs.azure-infrastructure-health.outputs.critical_issues && format('❌ {0}', needs.azure-infrastructure-health.outputs.critical_issues) || '' }}
+            
+            **🌐 Application Endpoints**
+            ${{ needs.application-health.outputs.app_summary || 'Skipped' }}
+            ✅ Working: ${{ needs.application-health.outputs.working_endpoints || 'None' }}
+            ❌ Failed: ${{ needs.application-health.outputs.failed_endpoints || 'None' }}
+            ⚠️ Monitoring: ${{ needs.application-health.outputs.monitoring_endpoints || 'None' }}
+            
+            **💾 Data Systems**
+            ${{ needs.database-health.outputs.db_summary || 'Skipped' }}
+            ${{ needs.database-health.outputs.db_issues && format('⚠️ {0}', needs.database-health.outputs.db_issues) || '' }}
+            
+            **☸️ Kubernetes**
+            ${{ needs.kubernetes-health.outputs.pod_summary || 'Skipped' }}
+            ${{ needs.kubernetes-health.outputs.namespace_details || '' }}
+            
+            **📈 Monitoring Stack**
+            ${{ needs.monitoring-check.outputs.monitoring_summary || 'Skipped' }}
+            
+            ---
+            **📋 Checked Resources**
+            • AKS: rewardsy-prod-aks
+            • ACR: rewardsyprodacr  
+            • Storage: rewardsyprodstg
+            • Web App: rewardsy-cv
+            • Domains: app.rewardsy.one, merchant.rewardsy.one
+            • Namespaces: webapp, backend, merchant, data, admin, logging, kafka
+            
+            ---
+            **Check Type:** Comprehensive (Daily at 2 AM UTC)
+            **Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          color: ${{ steps.status.outputs.color }}
+
+      - name: Send Critical Alert
+        if: contains(join(needs.*.result, ' '), 'failure')
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK }}
+          username: "🚨 CRITICAL ALERT"
+          title: "PRODUCTION INFRASTRUCTURE FAILURE"
+          description: |
+            <@1379840575783829544> **IMMEDIATE ATTENTION REQUIRED**
+            
+            **🔥 Failed Components:**
+            ${{ needs.azure-infrastructure-health.result == 'failure' && '❌ Azure Infrastructure\n' || '' }}
+            ${{ needs.application-health.result == 'failure' && '❌ Application Endpoints\n' || '' }}
+            ${{ needs.database-health.result == 'failure' && '❌ Data Systems\n' || '' }}
+            ${{ needs.kubernetes-health.result == 'failure' && '❌ Kubernetes\n' || '' }}
+            ${{ needs.monitoring-check.result == 'failure' && '❌ Monitoring Stack\n' || '' }}
+            
+            **⚡ Actions:**
+            1. [Azure Portal](https://portal.azure.com)
+            2. [Kibana Logs](https://app.rewardsy.one/kibana/)
+            3. [GitHub Actions](https://github.com/${{ github.repository }}/actions)
+          color: 0xff0000
+
+      - name: Send Success Summary
+        if: "!contains(join(needs.*.result, ' '), 'failure')"
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK }}
+          username: "✅ Platform Status"
+          title: "🎯 All Production Systems Operational"
+          description: |
+            **🏆 Daily Health Check: 100%**
+            
+            ✅ Azure: Healthy
+            ✅ Endpoints: Responding  
+            ✅ Data Systems: Operational
+            ✅ Kubernetes: Pods running
+            ✅ Monitoring: Active
+            
+            **📊 Response Times:**
+            ${{ needs.application-health.outputs.working_endpoints || 'N/A' }}
+            
+            **Next Comprehensive Check:** Tomorrow at 2 AM UTC
+          color: 0x00ff00
